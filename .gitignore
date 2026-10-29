@@ -1,6 +1,6 @@
 /.vscode
 /.gemini
-/.agent
+/.agents
 /node_modules
 /dist
 /node_modules

@@ -13,6 +13,7 @@ import { stepPowerAndMachines } from '../systems/power';
 import { BlueprintManager } from '../ugc/blueprint';
 import { embedWorldIntoPng, extractWorldFromPng } from '../ugc/pngStego';
 import { deserializeWorld, serializeWorld } from '../ugc/serializer';
+import { createUIButton, escapeHtml, InputModalController } from './components';
 import { DictKey, Locale, MATERIAL_LABELS, t } from './i18n';
 import { applyBrush } from './viewport';
 
@@ -20,8 +21,14 @@ const DISPLAY_SCALE = 4;
 const DISPLAY_W = WIDTH * DISPLAY_SCALE;   // 1024
 const DISPLAY_H = HEIGHT * DISPLAY_SCALE;  // 576
 
+/* Canvas オーバーレイ描画も UI Design System のトークン値と一致させる */
+const TOKEN_COLOR_ACCENT = '#A4B879';
+const TOKEN_COLOR_WARNING = '#D6A45F';
+const TOKEN_COLOR_TEXT_PRIMARY = '#E6E8DC';
+
 /**
- * TERRA-WEAVE アプリケーション統合コントローラ & UI (Phase 4)
+ * TERRA-WEAVE アプリケーション統合コントローラ & フィールド観測UI
+ * AGENTS.md UI Design System 準拠
  */
 export class TerraWeaveApp {
   readonly world = new WorldGrid(20261029);
@@ -32,10 +39,11 @@ export class TerraWeaveApp {
   readonly progression = new ProgressionManager();
   readonly storyteller = new Storyteller();
   readonly blueprints = new BlueprintManager();
+  readonly modal = new InputModalController();
 
   locale: Locale = 'ja';
   selectedMat: MatId = Mat.Water;
-  brushRadius: number = 2; // 0: 小(1px), 2: 中, 5: 大
+  brushRadius: number = 2; // 0: 1px, 2: S, 4: M, 7: L
   simSpeed: 0 | 1 | 2 = 1;
 
   // ビューポート（ズーム＆パン）
@@ -76,8 +84,8 @@ export class TerraWeaveApp {
   private dropOverlayEl!: HTMLElement;
 
   // 動的更新用DOM参照
-  private timeBadgeEl!: HTMLElement;
-  private weatherBadgeEl!: HTMLElement;
+  private timeReadoutEl!: HTMLElement;
+  private weatherReadoutEl!: HTMLElement;
   private goalBodyEl!: HTMLElement;
   private inspectorBodyEl!: HTMLElement;
   private spriteBodyEl!: HTMLElement;
@@ -85,12 +93,21 @@ export class TerraWeaveApp {
 
   constructor(root: HTMLElement) {
     this.root = root;
+    this.sanitizeStoredBlueprintNames();
     this.setupCoreCallbacks();
     this.buildLayout();
     this.initInitialWorld();
     this.bindEvents();
     this.refreshStaticUI();
     requestAnimationFrame(this.loop);
+  }
+
+  /** 既存 localStorage に絵文字付きプリセット名が残っている場合もクリーンな名称へ正規化する */
+  private sanitizeStoredBlueprintNames(): void {
+    for (const bp of this.blueprints.blueprints) {
+      if (bp.id === 'preset_greenhouse') bp.name = 'Glass Greenhouse';
+      if (bp.id === 'preset_rotor') bp.name = 'Rotor Generator';
+    }
   }
 
   private setupCoreCallbacks(): void {
@@ -104,10 +121,8 @@ export class TerraWeaveApp {
 
     this.progression.onStageUnlocked = (_stage, unlocked) => {
       this.sound.playChime('unlock');
-      const names = unlocked
-        .map((m) => `${MATERIAL_LABELS[m].icon}${MATERIAL_LABELS[m][this.locale]}`)
-        .join(' / ');
-      this.showToast(`${t(this.locale, 'toast_unlocked')} ${names}`);
+      const names = unlocked.map((m) => MATERIAL_LABELS[m][this.locale]).join(', ');
+      this.showToast(`${t(this.locale, 'toast_unlocked')} ${names}`, 'default');
       this.refreshStaticUI();
     };
 
@@ -115,14 +130,13 @@ export class TerraWeaveApp {
       if (weather !== 'clear') {
         this.sound.playChime('weather');
         const key = `weather_${weather}` as DictKey;
-        this.showToast(`${t(this.locale, 'toast_weather')} ${t(this.locale, key)}`);
+        this.showToast(`${t(this.locale, 'toast_weather')} ${t(this.locale, key)}`, 'warning');
       }
-      this.updateHeaderBadges();
+      this.updateHeaderReadouts();
     };
   }
 
   private initInitialWorld(): void {
-    // URLハッシュ (#world=...) があればサーバーレス復元を試みる
     if (window.location.hash.startsWith('#world=')) {
       const ok = deserializeWorld(window.location.hash, this.world, this.progression);
       if (ok) {
@@ -168,7 +182,7 @@ export class TerraWeaveApp {
 
     this.floatingHintEl = document.createElement('div');
     this.floatingHintEl.className = 'tw-floating-hint';
-    this.floatingHintEl.style.display = 'none';
+    this.floatingHintEl.hidden = true;
 
     this.toastEl = document.createElement('div');
     this.toastEl.className = 'tw-toast';
@@ -186,59 +200,81 @@ export class TerraWeaveApp {
     this.dockEl = document.createElement('footer');
     this.dockEl.className = 'tw-dock';
 
-    this.root.append(this.headerEl, workspace, this.dockEl);
+    this.root.append(this.headerEl, workspace, this.dockEl, this.modal.backdropEl);
   }
 
   /**
-   * モード切替・アンロック・言語切替時にUI全体を再描画する
+   * モード切替・アンロック・言語切替時にUI全体を再構築する
    */
   refreshStaticUI(): void {
     const loc = this.locale;
     this.dropOverlayEl.textContent = t(loc, 'drop_overlay');
 
-    // 1. ヘッダー構築
+    // 1. トップ観測機器バー (HUD Header)
     this.headerEl.innerHTML = '';
+
     const brand = document.createElement('div');
     brand.className = 'tw-brand';
-    brand.innerHTML = `<span>🌱 TERRA-WEAVE</span><span class="tw-brand-sub">256×144 Eco-Automata</span>`;
+    brand.innerHTML = `<span class="tw-brand-title">TERRA-WEAVE</span><span class="tw-brand-sub">256×144</span>`;
 
     const center = document.createElement('div');
     center.className = 'tw-header-center';
 
     const modeSeg = document.createElement('div');
     modeSeg.className = 'tw-seg';
-    const btnCozy = this.makeBtn(t(loc, 'mode_cozy'), this.progression.mode === 'cozy', () => {
-      if (this.progression.mode !== 'cozy') this.startNewWorld('cozy');
-    });
-    const btnAlch = this.makeBtn(t(loc, 'mode_alchemist'), this.progression.mode === 'alchemist', () => {
-      if (this.progression.mode !== 'alchemist') this.startNewWorld('alchemist');
-    });
-    modeSeg.append(btnCozy, btnAlch);
+    modeSeg.append(
+      createUIButton({
+        label: t(loc, 'mode_cozy'),
+        variant: 'segment',
+        active: this.progression.mode === 'cozy',
+        onClick: () => {
+          if (this.progression.mode !== 'cozy') this.startNewWorld('cozy');
+        },
+      }),
+      createUIButton({
+        label: t(loc, 'mode_alchemist'),
+        variant: 'segment',
+        active: this.progression.mode === 'alchemist',
+        onClick: () => {
+          if (this.progression.mode !== 'alchemist') this.startNewWorld('alchemist');
+        },
+      })
+    );
 
-    this.timeBadgeEl = document.createElement('span');
-    this.timeBadgeEl.className = 'tw-badge';
-    this.weatherBadgeEl = document.createElement('span');
-    this.weatherBadgeEl.className = 'tw-badge';
+    const readoutStrip = document.createElement('div');
+    readoutStrip.className = 'tw-readout-strip';
+    this.timeReadoutEl = document.createElement('span');
+    this.timeReadoutEl.className = 'tw-readout-item';
+    const sep = document.createElement('span');
+    sep.className = 'tw-divider-v';
+    this.weatherReadoutEl = document.createElement('span');
+    this.weatherReadoutEl.className = 'tw-readout-item';
+    readoutStrip.append(this.timeReadoutEl, sep, this.weatherReadoutEl);
 
-    center.append(modeSeg, this.timeBadgeEl, this.weatherBadgeEl);
+    center.append(modeSeg, readoutStrip);
 
-    // Cozy Mode または 天候制御アンテナ解放時はワンクリック天候切替を表示
-    if (this.progression.mode === 'cozy' || this.progression.stage > 5 || this.storyteller.lastStats.hasActiveAntenna) {
+    // Cozy Mode または 天候アンテナ解放時は矩形セグメントの天候トリガーを表示（絵文字不使用）
+    if (
+      this.progression.mode === 'cozy' ||
+      this.progression.stage > 5 ||
+      this.storyteller.lastStats.hasActiveAntenna
+    ) {
       const wSeg = document.createElement('div');
       wSeg.className = 'tw-seg';
-      const weathers: { k: WeatherKind; icon: string }[] = [
-        { k: 'clear', icon: '☀️' },
-        { k: 'monsoon', icon: '🌧️' },
-        { k: 'heatwave', icon: '🔥' },
-        { k: 'starfall', icon: '🌠' },
-      ];
-      for (const w of weathers) {
-        const wb = this.makeBtn(w.icon, this.storyteller.currentWeather === w.k, () => {
-          this.storyteller.triggerWeather(w.k, 960);
-          this.refreshStaticUI();
-        });
-        wb.title = t(loc, `weather_${w.k}` as DictKey);
-        wSeg.appendChild(wb);
+      const weathers: WeatherKind[] = ['clear', 'monsoon', 'heatwave', 'starfall'];
+      for (const wk of weathers) {
+        wSeg.appendChild(
+          createUIButton({
+            label: t(loc, `weather_short_${wk}` as DictKey),
+            title: t(loc, `weather_${wk}` as DictKey),
+            variant: 'segment',
+            active: this.storyteller.currentWeather === wk,
+            onClick: () => {
+              this.storyteller.triggerWeather(wk, 960);
+              this.refreshStaticUI();
+            },
+          })
+        );
       }
       center.appendChild(wSeg);
     }
@@ -246,136 +282,158 @@ export class TerraWeaveApp {
     const right = document.createElement('div');
     right.className = 'tw-header-right';
 
-    const btnLang = this.makeBtn(loc === 'ja' ? '🌐 日本語 / EN' : '🌐 EN / 日本語', false, () => {
-      this.locale = this.locale === 'ja' ? 'en' : 'ja';
-      this.refreshStaticUI();
+    const btnLang = createUIButton({
+      label: loc === 'ja' ? 'JA / EN' : 'EN / JA',
+      title: 'Switch Language',
+      onClick: () => {
+        this.locale = this.locale === 'ja' ? 'en' : 'ja';
+        this.refreshStaticUI();
+      },
     });
-    btnLang.className = 'tw-btn';
 
-    const btnMute = this.makeBtn(this.sound.isMuted() ? '🔇' : '🔊', !this.sound.isMuted(), () => {
-      this.sound.unlock();
-      this.sound.toggleMute();
-      this.refreshStaticUI();
+    const btnMute = createUIButton({
+      icon: this.sound.isMuted() ? 'volumeOff' : 'volumeOn',
+      title: this.sound.isMuted() ? 'Unmute Audio' : 'Mute Audio',
+      active: this.sound.isMuted(),
+      onClick: () => {
+        this.sound.unlock();
+        this.sound.toggleMute();
+        this.refreshStaticUI();
+      },
     });
-    btnMute.className = 'tw-btn';
 
     right.append(btnLang, btnMute);
     this.headerEl.append(brand, center, right);
 
-    // 2. 右サイドパネル構築
+    // 2. 右サイドパネル（個別カードを廃止し、1pxセパレータ区切りのフラット計器セクションで構成）
     this.sidebarEl.innerHTML = '';
 
-    // Goal / Tips Card
-    const goalCard = document.createElement('section');
-    goalCard.className = 'tw-card';
-    goalCard.innerHTML = `<div class="tw-card-title">${
-      this.progression.mode === 'alchemist' ? t(loc, 'panel_goal') : t(loc, 'panel_tips')
-    }</div>`;
+    // Section 1: 目標 / 観測ノート
+    const goalSec = document.createElement('section');
+    goalSec.className = 'tw-section';
+    const goalHeader = document.createElement('div');
+    goalHeader.className = 'tw-section-header';
+    goalHeader.textContent =
+      this.progression.mode === 'alchemist' ? t(loc, 'panel_goal') : t(loc, 'panel_tips');
     this.goalBodyEl = document.createElement('div');
-    goalCard.appendChild(this.goalBodyEl);
+    goalSec.append(goalHeader, this.goalBodyEl);
 
-    // Inspector Card
-    const inspCard = document.createElement('section');
-    inspCard.className = 'tw-card';
-    inspCard.innerHTML = `<div class="tw-card-title"><span>${t(loc, 'panel_inspector')}</span><span id="tw-fps">60 FPS</span></div>`;
+    // Section 2: セル観測値 (Inspector)
+    const inspSec = document.createElement('section');
+    inspSec.className = 'tw-section';
+    const inspHeader = document.createElement('div');
+    inspHeader.className = 'tw-section-header';
+    inspHeader.innerHTML = `<span>${escapeHtml(t(loc, 'panel_inspector'))}</span><span id="tw-fps" class="tw-fps-readout">${this.fps} FPS</span>`;
     this.inspectorBodyEl = document.createElement('div');
     this.inspectorBodyEl.className = 'tw-kv-grid';
-    inspCard.appendChild(this.inspectorBodyEl);
+    inspSec.append(inspHeader, this.inspectorBodyEl);
 
-    // Sprites Card
-    const spriteCard = document.createElement('section');
-    spriteCard.className = 'tw-card';
-    spriteCard.innerHTML = `<div class="tw-card-title">${t(loc, 'panel_sprites')}</div>`;
+    // Section 3: スプライト個体数
+    const spriteSec = document.createElement('section');
+    spriteSec.className = 'tw-section';
+    const spriteHeader = document.createElement('div');
+    spriteHeader.className = 'tw-section-header';
+    spriteHeader.textContent = t(loc, 'panel_sprites');
     this.spriteBodyEl = document.createElement('div');
     this.spriteBodyEl.className = 'tw-kv-grid';
-    spriteCard.appendChild(this.spriteBodyEl);
+    spriteSec.append(spriteHeader, this.spriteBodyEl);
 
-    // Blueprint Card
-    const bpCard = document.createElement('section');
-    bpCard.className = 'tw-card';
+    // Section 4: ブループリント
+    const bpSec = document.createElement('section');
+    bpSec.className = 'tw-section';
     const bpHeader = document.createElement('div');
-    bpHeader.className = 'tw-card-title';
-    bpHeader.innerHTML = `<span>${t(loc, 'panel_blueprints')}</span>`;
-    const bpActionRow = document.createElement('div');
-    bpActionRow.style.display = 'flex';
-    bpActionRow.style.gap = '5px';
+    bpHeader.className = 'tw-section-header';
+    bpHeader.textContent = t(loc, 'panel_blueprints');
 
-    const btnCap = this.makeBtn(t(loc, 'btn_capture_bp'), this.isCapturingBp, () => {
-      this.isCapturingBp = !this.isCapturingBp;
-      this.blueprints.activeBlueprintId = null;
-      this.bpDragStart = null;
-      this.updateFloatingHint();
-      this.refreshStaticUI();
-    });
-    btnCap.className = `tw-btn ${this.isCapturingBp ? 'active' : ''}`;
-    bpActionRow.appendChild(btnCap);
+    const bpActions = document.createElement('div');
+    bpActions.className = 'tw-action-row';
+    bpActions.appendChild(
+      createUIButton({
+        label: t(loc, 'btn_capture_bp'),
+        icon: 'capture',
+        variant: 'ghost',
+        active: this.isCapturingBp,
+        onClick: () => {
+          this.isCapturingBp = !this.isCapturingBp;
+          this.blueprints.activeBlueprintId = null;
+          this.bpDragStart = null;
+          this.updateFloatingHint();
+          this.refreshStaticUI();
+        },
+      })
+    );
 
     if (this.blueprints.activeBlueprintId) {
-      const btnCancelBp = this.makeBtn(t(loc, 'btn_cancel_bp'), false, () => {
-        this.blueprints.activeBlueprintId = null;
-        this.refreshStaticUI();
-      });
-      btnCancelBp.className = 'tw-btn';
-      bpActionRow.appendChild(btnCancelBp);
+      bpActions.appendChild(
+        createUIButton({
+          label: t(loc, 'btn_cancel_bp'),
+          variant: 'ghost',
+          onClick: () => {
+            this.blueprints.activeBlueprintId = null;
+            this.refreshStaticUI();
+          },
+        })
+      );
     }
 
     this.bpListEl = document.createElement('div');
     this.bpListEl.className = 'tw-bp-list';
-    this.renderBlueprintChips();
+    this.renderBlueprintItems();
 
-    bpCard.append(bpHeader, bpActionRow, this.bpListEl);
+    bpSec.append(bpHeader, bpActions, this.bpListEl);
 
-    // Share / Load Card
-    const shareCard = document.createElement('section');
-    shareCard.className = 'tw-card';
-    shareCard.innerHTML = `<div class="tw-card-title">${t(loc, 'panel_share')}</div>`;
+    // Section 5: ワールド入出力 (Share / Load)
+    const shareSec = document.createElement('section');
+    shareSec.className = 'tw-section';
+    const shareHeader = document.createElement('div');
+    shareHeader.className = 'tw-section-header';
+    shareHeader.textContent = t(loc, 'panel_share');
+
     const shareBtns = document.createElement('div');
-    shareBtns.style.display = 'flex';
-    shareBtns.style.gap = '6px';
-
-    const btnCopyUrl = this.makeBtn(t(loc, 'btn_copy_url'), false, () => {
-      void this.copyShareUrl();
-    });
-    btnCopyUrl.className = 'tw-btn';
-
-    const btnLoadCode = this.makeBtn(t(loc, 'btn_load_code'), false, () => {
-      const input = window.prompt(t(this.locale, 'prompt_code'));
-      if (input) {
-        const ok = deserializeWorld(input, this.world, this.progression);
-        if (ok) {
-          this.sprites.clear();
-          this.showToast(t(this.locale, 'toast_loaded'));
-          this.refreshStaticUI();
-        } else {
-          this.showToast(t(this.locale, 'toast_load_err'));
-        }
-      }
-    });
-    btnLoadCode.className = 'tw-btn';
-    shareBtns.append(btnCopyUrl, btnLoadCode);
+    shareBtns.className = 'tw-action-row';
+    shareBtns.append(
+      createUIButton({
+        label: t(loc, 'btn_copy_url'),
+        icon: 'link',
+        variant: 'ghost',
+        onClick: () => {
+          void this.copyShareUrl();
+        },
+      }),
+      createUIButton({
+        label: t(loc, 'btn_load_code'),
+        icon: 'upload',
+        variant: 'ghost',
+        onClick: () => {
+          this.openLoadCodeModal();
+        },
+      })
+    );
 
     const dropHint = document.createElement('p');
     dropHint.className = 'tw-hint-small';
     dropHint.textContent = t(loc, 'png_drop_hint');
-    shareCard.append(shareBtns, dropHint);
+    shareSec.append(shareHeader, shareBtns, dropHint);
 
-    this.sidebarEl.append(goalCard, inspCard, spriteCard, bpCard, shareCard);
+    this.sidebarEl.append(goalSec, inspSec, spriteSec, bpSec, shareSec);
 
-    // 3. 下部ブラシ＆操作ドック構築
+    // 3. 下部マテリアルパレット＆操作ドック
     this.dockEl.innerHTML = '';
     const brushRow = document.createElement('div');
     brushRow.className = 'tw-brushes';
 
     const available = this.progression.getAvailableBrushes();
-    for (const mat of available) {
+    for (let i = 0; i < available.length; i++) {
+      const mat = available[i];
       const info = MATERIAL_LABELS[mat];
-      const b = document.createElement('button');
-      b.className = `tw-brush-btn ${
-        !this.blueprints.activeBlueprintId && this.selectedMat === mat ? 'active' : ''
-      }`;
-      b.innerHTML = `<span>${info.icon}</span><span>${info[loc]}</span>`;
-      b.title = loc === 'ja' ? info.hintJa : info.hintEn;
-      b.addEventListener('click', () => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      const isSelected = !this.blueprints.activeBlueprintId && this.selectedMat === mat;
+      btn.className = `tw-brush-btn${isSelected ? ' is-selected' : ''}`;
+      btn.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+      btn.textContent = info[loc];
+      btn.title = loc === 'ja' ? info.hintJa : info.hintEn;
+      btn.addEventListener('click', () => {
         this.sound.unlock();
         this.selectedMat = mat;
         this.blueprints.activeBlueprintId = null;
@@ -383,131 +441,201 @@ export class TerraWeaveApp {
         this.updateFloatingHint();
         this.refreshStaticUI();
       });
-      brushRow.appendChild(b);
+      brushRow.appendChild(btn);
+
+      // 消去ツール (Mat.Air) と生成マテリアルの間に控えめな縦セパレータを置く
+      if (mat === Mat.Air && available.length > 1) {
+        const div = document.createElement('span');
+        div.className = 'tw-divider-v';
+        brushRow.appendChild(div);
+      }
     }
 
     const ctrlRow = document.createElement('div');
     ctrlRow.className = 'tw-dock-controls';
 
     const leftCtrls = document.createElement('div');
-    leftCtrls.style.display = 'flex';
-    leftCtrls.style.alignItems = 'center';
-    leftCtrls.style.gap = '8px';
+    leftCtrls.className = 'tw-dock-left';
 
-    // ブラシサイズ切替
+    // ブラシ径グループ
+    const sizeGroup = document.createElement('div');
+    sizeGroup.className = 'tw-control-group';
+    const sizeLabel = document.createElement('span');
+    sizeLabel.className = 'tw-group-label';
+    sizeLabel.textContent = t(loc, 'label_brush_size');
     const sizeSeg = document.createElement('div');
     sizeSeg.className = 'tw-seg';
     const sizes: { r: number; label: string }[] = [
-      { r: 0, label: '• 1px' },
-      { r: 2, label: '● S' },
-      { r: 4, label: '⬤ M' },
-      { r: 7, label: '⬤ L' },
+      { r: 0, label: '1px' },
+      { r: 2, label: 'S' },
+      { r: 4, label: 'M' },
+      { r: 7, label: 'L' },
     ];
     for (const s of sizes) {
       sizeSeg.appendChild(
-        this.makeBtn(s.label, this.brushRadius === s.r, () => {
-          this.brushRadius = s.r;
-          this.refreshStaticUI();
+        createUIButton({
+          label: s.label,
+          variant: 'segment',
+          active: this.brushRadius === s.r,
+          onClick: () => {
+            this.brushRadius = s.r;
+            this.refreshStaticUI();
+          },
         })
       );
     }
+    sizeGroup.append(sizeLabel, sizeSeg);
 
-    // 速度切替
+    // シミュレーション速度グループ（単色同線幅SVGアイコン）
+    const speedGroup = document.createElement('div');
+    speedGroup.className = 'tw-control-group';
+    const speedLabel = document.createElement('span');
+    speedLabel.className = 'tw-group-label';
+    speedLabel.textContent = t(loc, 'label_sim_speed');
     const speedSeg = document.createElement('div');
     speedSeg.className = 'tw-seg';
-    const speeds: { v: 0 | 1 | 2; label: string }[] = [
-      { v: 0, label: '⏸️' },
-      { v: 1, label: '▶️ 1x' },
-      { v: 2, label: '⏩ 2x' },
-    ];
-    for (const sp of speeds) {
-      speedSeg.appendChild(
-        this.makeBtn(sp.label, this.simSpeed === sp.v, () => {
-          this.simSpeed = sp.v;
+    speedSeg.append(
+      createUIButton({
+        icon: 'pause',
+        title: 'Pause (0x)',
+        variant: 'segment',
+        active: this.simSpeed === 0,
+        onClick: () => {
+          this.simSpeed = 0;
           this.refreshStaticUI();
-        })
-      );
-    }
+        },
+      }),
+      createUIButton({
+        icon: 'play',
+        label: '1x',
+        title: 'Normal Speed (1x)',
+        variant: 'segment',
+        active: this.simSpeed === 1,
+        onClick: () => {
+          this.simSpeed = 1;
+          this.refreshStaticUI();
+        },
+      }),
+      createUIButton({
+        icon: 'fastForward',
+        label: '2x',
+        title: 'Fast Speed (2x)',
+        variant: 'segment',
+        active: this.simSpeed === 2,
+        onClick: () => {
+          this.simSpeed = 2;
+          this.refreshStaticUI();
+        },
+      })
+    );
+    speedGroup.append(speedLabel, speedSeg);
 
     const activeInfo = MATERIAL_LABELS[this.selectedMat];
     const brushTip = document.createElement('span');
     brushTip.className = 'tw-brush-tooltip';
-    brushTip.textContent = `${activeInfo.icon} ${activeInfo[loc]} — ${
+    brushTip.innerHTML = `<strong>${escapeHtml(activeInfo[loc])}</strong> — ${escapeHtml(
       loc === 'ja' ? activeInfo.hintJa : activeInfo.hintEn
-    }`;
+    )}`;
 
-    leftCtrls.append(sizeSeg, speedSeg, brushTip);
+    leftCtrls.append(sizeGroup, speedGroup, brushTip);
 
     const rightCtrls = document.createElement('div');
-    rightCtrls.style.display = 'flex';
-    rightCtrls.style.gap = '6px';
+    rightCtrls.className = 'tw-dock-right';
 
     if (this.zoom > 1.01 || this.panX !== 0 || this.panY !== 0) {
-      const btnResetZoom = this.makeBtn(t(loc, 'btn_reset_view'), false, () => {
-        this.zoom = 1.0;
-        this.panX = 0;
-        this.panY = 0;
-        this.refreshStaticUI();
-      });
-      btnResetZoom.className = 'tw-btn';
-      rightCtrls.appendChild(btnResetZoom);
+      rightCtrls.appendChild(
+        createUIButton({
+          label: t(loc, 'btn_reset_view'),
+          variant: 'ghost',
+          onClick: () => {
+            this.zoom = 1.0;
+            this.panX = 0;
+            this.panY = 0;
+            this.refreshStaticUI();
+          },
+        })
+      );
     }
 
-    const btnNew = this.makeBtn(t(loc, 'btn_new_world'), false, () => {
-      this.startNewWorld(this.progression.mode);
-    });
-    btnNew.className = 'tw-btn';
+    rightCtrls.append(
+      createUIButton({
+        label: t(loc, 'btn_new_world'),
+        icon: 'refresh',
+        variant: 'ghost',
+        onClick: () => {
+          this.startNewWorld(this.progression.mode);
+        },
+      }),
+      createUIButton({
+        label: t(loc, 'btn_snapshot'),
+        icon: 'download',
+        onClick: () => {
+          void this.downloadEmbeddedPngSnapshot();
+        },
+      })
+    );
 
-    const btnSnap = this.makeBtn(t(loc, 'btn_snapshot'), false, () => {
-      void this.downloadEmbeddedPngSnapshot();
-    });
-    btnSnap.className = 'tw-btn';
-
-    rightCtrls.append(btnNew, btnSnap);
     ctrlRow.append(leftCtrls, rightCtrls);
     this.dockEl.append(brushRow, ctrlRow);
 
-    this.updateHeaderBadges();
+    this.updateHeaderReadouts();
     this.updateSidebarDynamic();
   }
 
-  private renderBlueprintChips(): void {
+  private renderBlueprintItems(): void {
     this.bpListEl.innerHTML = '';
     for (const bp of this.blueprints.blueprints) {
-      const chip = document.createElement('button');
-      chip.className = `tw-bp-chip ${this.blueprints.activeBlueprintId === bp.id ? 'active' : ''}`;
-      chip.textContent = `${bp.name} (${bp.width}×${bp.height})`;
-      chip.addEventListener('click', () => {
+      const isSelected = this.blueprints.activeBlueprintId === bp.id;
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = `tw-bp-item${isSelected ? ' is-selected' : ''}`;
+      item.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+      item.innerHTML = `<span>${escapeHtml(bp.name)}</span><span class="tw-bp-dim">${bp.width}×${bp.height}</span>`;
+      item.addEventListener('click', () => {
         this.isCapturingBp = false;
-        this.blueprints.activeBlueprintId =
-          this.blueprints.activeBlueprintId === bp.id ? null : bp.id;
+        this.blueprints.activeBlueprintId = isSelected ? null : bp.id;
         this.updateFloatingHint();
         this.refreshStaticUI();
       });
-      this.bpListEl.appendChild(chip);
+      this.bpListEl.appendChild(item);
     }
+  }
+
+  private openLoadCodeModal(): void {
+    const loc = this.locale;
+    this.modal.open({
+      title: t(loc, 'modal_code_title'),
+      placeholder: t(loc, 'modal_code_placeholder'),
+      confirmLabel: t(loc, 'modal_confirm'),
+      cancelLabel: t(loc, 'modal_cancel'),
+      onConfirm: (code) => {
+        const ok = deserializeWorld(code, this.world, this.progression);
+        if (ok) {
+          this.sprites.clear();
+          this.showToast(t(this.locale, 'toast_loaded'), 'default');
+          this.refreshStaticUI();
+        } else {
+          this.showToast(t(this.locale, 'toast_load_err'), 'error');
+        }
+      },
+    });
   }
 
   private updateFloatingHint(): void {
     if (this.isCapturingBp) {
       this.floatingHintEl.textContent = t(this.locale, 'bp_capturing_hint');
-      this.floatingHintEl.style.display = 'block';
+      this.floatingHintEl.hidden = false;
     } else {
-      this.floatingHintEl.style.display = 'none';
+      this.floatingHintEl.hidden = true;
     }
-  }
-
-  private makeBtn(label: string, active: boolean, onClick: () => void): HTMLButtonElement {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = label;
-    if (active) b.classList.add('active');
-    b.addEventListener('click', onClick);
-    return b;
   }
 
   private bindEvents(): void {
     window.addEventListener('keydown', (e) => {
+      if (this.modal.isOpen()) {
+        if (e.key === 'Escape') this.modal.close(false);
+        return;
+      }
       if (e.code === 'Space') {
         this.isSpaceDown = true;
       }
@@ -531,6 +659,7 @@ export class TerraWeaveApp {
     });
 
     this.canvas.addEventListener('pointerdown', (e) => {
+      if (this.modal.isOpen()) return;
       this.sound.unlock();
       this.canvas.setPointerCapture(e.pointerId);
       const pos = this.clientToGrid(e.clientX, e.clientY);
@@ -539,19 +668,16 @@ export class TerraWeaveApp {
       this.lastClientX = e.clientX;
       this.lastClientY = e.clientY;
 
-      // 中クリック または Space押下中はパン移動
       if (e.button === 1 || (e.button === 0 && this.isSpaceDown)) {
         this.isPanning = true;
         return;
       }
 
-      // ブループリント範囲キャプチャ開始
       if (this.isCapturingBp && e.button === 0) {
         this.bpDragStart = { x: pos.x, y: pos.y };
         return;
       }
 
-      // ブループリントのスタンプ配置
       const activeBp = this.blueprints.getActive();
       if (activeBp && e.button === 0) {
         const placed = this.blueprints.stamp(
@@ -587,7 +713,6 @@ export class TerraWeaveApp {
       }
 
       if (this.isDrawing) {
-        // 高速ドラッグ時に線が途切れないよう線形補間してブラシ適用
         this.paintLine(this.hoverX, this.hoverY, pos.x, pos.y);
       }
 
@@ -597,33 +722,50 @@ export class TerraWeaveApp {
 
     this.canvas.addEventListener('pointerup', (e) => {
       if (this.isCapturingBp && this.bpDragStart) {
+        const start = this.bpDragStart;
         const end = this.clientToGrid(e.clientX, e.clientY);
-        const defaultName = `Blueprint #${this.blueprints.blueprints.length + 1}`;
-        const name = window.prompt(t(this.locale, 'prompt_bp_name'), defaultName);
-        if (name) {
-          const bp = this.blueprints.captureRegion(
-            this.world,
-            this.bpDragStart.x,
-            this.bpDragStart.y,
-            end.x,
-            end.y,
-            name
-          );
-          if (bp) {
-            this.blueprints.activeBlueprintId = bp.id;
-            this.showToast(t(this.locale, 'toast_bp_saved'));
-          }
-        }
         this.bpDragStart = null;
         this.isCapturingBp = false;
         this.updateFloatingHint();
-        this.refreshStaticUI();
+
+        const w = Math.abs(end.x - start.x) + 1;
+        const h = Math.abs(end.y - start.y) + 1;
+        if (w >= 2 && h >= 2) {
+          const loc = this.locale;
+          const defaultName = `Module ${this.blueprints.blueprints.length + 1}`;
+          this.modal.open({
+            title: t(loc, 'modal_bp_title'),
+            placeholder: t(loc, 'modal_bp_placeholder'),
+            defaultValue: defaultName,
+            confirmLabel: t(loc, 'modal_confirm'),
+            cancelLabel: t(loc, 'modal_cancel'),
+            onConfirm: (name) => {
+              const bp = this.blueprints.captureRegion(
+                this.world,
+                start.x,
+                start.y,
+                end.x,
+                end.y,
+                name
+              );
+              if (bp) {
+                this.blueprints.activeBlueprintId = bp.id;
+                this.showToast(t(this.locale, 'toast_bp_saved'), 'default');
+              }
+              this.refreshStaticUI();
+            },
+            onCancel: () => {
+              this.refreshStaticUI();
+            },
+          });
+        } else {
+          this.refreshStaticUI();
+        }
       }
       this.isDrawing = false;
       this.isPanning = false;
     });
 
-    // ホイールによるズーム操作
     this.canvas.addEventListener(
       'wheel',
       (e) => {
@@ -645,7 +787,6 @@ export class TerraWeaveApp {
       { passive: false }
     );
 
-    // PNG ファイルのドラッグ＆ドロップ復元
     window.addEventListener('dragover', (e) => {
       e.preventDefault();
       this.dropOverlayEl.classList.add('active');
@@ -712,7 +853,6 @@ export class TerraWeaveApp {
    * メインの 60FPS シミュレーション＆レンダリングループ
    */
   private loop = (): void => {
-    // 1. シミュレーションステップ（一時停止=0, 通常=1, 倍速=2）
     for (let step = 0; step < this.simSpeed; step++) {
       stepSimulation(this.world);
       stepPowerAndMachines(this.world);
@@ -723,16 +863,13 @@ export class TerraWeaveApp {
       this.storyteller.update(this.world, this.sprites, this.progression);
     }
 
-    // 2. プロシージャル環境オーディオの更新
     if (this.world.tick % 15 === 0) {
       const rainFactor = this.storyteller.currentWeather === 'monsoon' ? 1.0 : 0.08;
       this.sound.updateAmbient(rainFactor, this.world.isNight());
     }
 
-    // 3. オフスクリーン描画＋スプライト描画＋グロー合成
     this.renderFrame();
 
-    // 4. FPSとUIインスペクターの定期更新（10フレームごと）
     this.frameCounter++;
     const now = performance.now();
     if (now - this.lastFpsTime >= 500) {
@@ -743,7 +880,7 @@ export class TerraWeaveApp {
       if (fpsEl) fpsEl.textContent = `${this.fps} FPS`;
     }
     if ((this.frameCounter & 7) === 0) {
-      this.updateHeaderBadges();
+      this.updateHeaderReadouts();
       this.updateSidebarDynamic();
     }
 
@@ -756,19 +893,14 @@ export class TerraWeaveApp {
       this.isPointerInside &&
       this.selectedMat !== Mat.Air;
 
-    // 1. 256x144 ピクセルのセル描画
     this.renderer.renderPixels(this.world, showGuard);
-
-    // 2. 256x144 上にドット絵スプライトを描画
     this.sprites.render(this.renderer.offCtx, this.world);
 
-    // 3. 15Hz または毎フレームのグローマップ更新
     if ((this.world.tick & 1) === 0) {
       const extraLights = this.sprites.getLightSources(this.world);
       this.lighting.updateGlowMap(this.world, extraLights);
     }
 
-    // 4. メインキャンバスへズーム＆パン適用でシャープに転送
     const viewW = WIDTH / this.zoom;
     const viewH = HEIGHT / this.zoom;
 
@@ -787,7 +919,6 @@ export class TerraWeaveApp {
       DISPLAY_H
     );
 
-    // 5. 低解像度グローライトを滑らかなバイリニア補間＋Screen合成で重ねる
     this.ctx.globalCompositeOperation = 'screen';
     this.ctx.imageSmoothingEnabled = true;
     this.ctx.drawImage(
@@ -803,8 +934,7 @@ export class TerraWeaveApp {
     );
     this.ctx.restore();
 
-    // 6. カーソル・ブループリント選択オーバーレイ描画
-    if (this.isPointerInside) {
+    if (this.isPointerInside && !this.modal.isOpen()) {
       this.renderCursorOverlay(viewW, viewH);
     }
   }
@@ -817,15 +947,14 @@ export class TerraWeaveApp {
 
     this.ctx.save();
 
-    // ブループリント矩形ドラッグ中
     if (this.isCapturingBp && this.bpDragStart) {
       const minX = Math.min(this.bpDragStart.x, this.hoverX);
       const maxX = Math.max(this.bpDragStart.x, this.hoverX);
       const minY = Math.min(this.bpDragStart.y, this.hoverY);
       const maxY = Math.max(this.bpDragStart.y, this.hoverY);
-      this.ctx.strokeStyle = '#f6c458';
-      this.ctx.lineWidth = 2;
-      this.ctx.setLineDash([6, 4]);
+      this.ctx.strokeStyle = TOKEN_COLOR_WARNING;
+      this.ctx.lineWidth = 1.5;
+      this.ctx.setLineDash([4, 4]);
       this.ctx.strokeRect(
         toScreenX(minX),
         toScreenY(minY),
@@ -836,37 +965,33 @@ export class TerraWeaveApp {
       return;
     }
 
-    // ブループリントのゴーストスタンプ表示
     const activeBp = this.blueprints.getActive();
     if (activeBp) {
       const sx = this.hoverX - (activeBp.width >> 1);
       const sy = this.hoverY - (activeBp.height >> 1);
-      this.ctx.strokeStyle = '#6cecb0';
-      this.ctx.fillStyle = 'rgba(108, 236, 176, 0.14)';
-      this.ctx.lineWidth = 2;
+      this.ctx.strokeStyle = TOKEN_COLOR_ACCENT;
+      this.ctx.lineWidth = 1.5;
       const rx = toScreenX(sx);
       const ry = toScreenY(sy);
       const rw = activeBp.width * cellScreenW;
       const rh = activeBp.height * cellScreenH;
-      this.ctx.fillRect(rx, ry, rw, rh);
       this.ctx.strokeRect(rx, ry, rw, rh);
       this.ctx.restore();
       return;
     }
 
-    // 通常の円形ブラシカーソル
     const cx = toScreenX(this.hoverX + 0.5);
     const cy = toScreenY(this.hoverY + 0.5);
     const rPx = Math.max(cellScreenW * 0.5, (this.brushRadius + 0.5) * cellScreenW);
-    this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.72)';
-    this.ctx.lineWidth = 1.5;
+    this.ctx.strokeStyle = TOKEN_COLOR_TEXT_PRIMARY;
+    this.ctx.lineWidth = 1;
     this.ctx.beginPath();
     this.ctx.arc(cx, cy, rPx, 0, Math.PI * 2);
     this.ctx.stroke();
     this.ctx.restore();
   }
 
-  private updateHeaderBadges(): void {
+  private updateHeaderReadouts(): void {
     const loc = this.locale;
     const tod = this.world.timeOfDay;
     const phaseKey: DictKey =
@@ -878,36 +1003,39 @@ export class TerraWeaveApp {
             ? 'time_noon'
             : 'time_evening';
 
-    this.timeBadgeEl.textContent = `⏱️ ${t(loc, 'day_prefix')} ${this.world.dayCount} (${t(loc, phaseKey)})`;
+    this.timeReadoutEl.textContent = `${t(loc, 'day_prefix')} ${this.world.dayCount} · ${t(loc, phaseKey)}`;
 
     const wKey = `weather_${this.storyteller.currentWeather}` as DictKey;
-    this.weatherBadgeEl.textContent = t(loc, wKey);
-    this.weatherBadgeEl.className = `tw-badge ${
-      this.storyteller.currentWeather !== 'clear' ? 'weather-active' : ''
-    }`;
+    this.weatherReadoutEl.textContent = t(loc, wKey);
+    this.weatherReadoutEl.className =
+      this.storyteller.currentWeather !== 'clear'
+        ? 'tw-readout-item is-warning'
+        : 'tw-readout-muted';
   }
 
   private updateSidebarDynamic(): void {
     const loc = this.locale;
 
-    // 1. 目標 / ヒント更新
+    // 1. 目標 / 観測ノート更新
     if (this.progression.mode === 'cozy') {
       this.goalBodyEl.innerHTML = `
-        <p class="tw-goal-desc">• ${t(loc, 'cozy_tip_1')}</p>
-        <p class="tw-goal-desc">• ${t(loc, 'cozy_tip_2')}</p>
-        <p class="tw-goal-desc">• ${t(loc, 'cozy_tip_3')}</p>
-        <p class="tw-goal-desc">• ${t(loc, 'cozy_tip_4')}</p>
+        <ul class="tw-notes-list">
+          <li>${escapeHtml(t(loc, 'cozy_tip_1'))}</li>
+          <li>${escapeHtml(t(loc, 'cozy_tip_2'))}</li>
+          <li>${escapeHtml(t(loc, 'cozy_tip_3'))}</li>
+          <li>${escapeHtml(t(loc, 'cozy_tip_4'))}</li>
+        </ul>
       `;
     } else {
       const st = this.progression.getCurrentStageDef();
       if (!st) {
-        this.goalBodyEl.innerHTML = `<p class="tw-goal-desc" style="color:var(--accent-mint)">${t(loc, 'all_stages_done')}</p>`;
+        this.goalBodyEl.innerHTML = `<p class="tw-status-complete">${escapeHtml(t(loc, 'all_stages_done'))}</p>`;
       } else {
         const rows = st.requirements
           .map((req) => {
             const cur = this.progression.progress[req.kind];
             const pct = Math.min(100, Math.round((cur / req.target) * 100));
-            const label = t(loc, `req_${req.kind}` as DictKey);
+            const label = escapeHtml(t(loc, `req_${req.kind}` as DictKey));
             return `
               <div class="tw-progress-row">
                 <div class="tw-progress-label"><span>${label}</span><span>${cur} / ${req.target}</span></div>
@@ -917,18 +1045,18 @@ export class TerraWeaveApp {
           })
           .join('');
         const unlocks = st.unlockedBrushes
-          .map((m) => `${MATERIAL_LABELS[m].icon}${MATERIAL_LABELS[m][loc]}`)
+          .map((m) => escapeHtml(MATERIAL_LABELS[m][loc]))
           .join(', ');
         this.goalBodyEl.innerHTML = `
-          <div style="font-weight:600;font-size:12px;">${t(loc, st.titleKey as DictKey)}</div>
-          <p class="tw-goal-desc">${t(loc, st.descKey as DictKey)}</p>
-          ${rows}
-          <p class="tw-hint-small" style="margin-top:4px;color:var(--accent-amber)">${t(loc, 'next_unlock')} ${unlocks}</p>
+          <div class="tw-stage-title">${escapeHtml(t(loc, st.titleKey as DictKey))}</div>
+          <p class="tw-body-text">${escapeHtml(t(loc, st.descKey as DictKey))}</p>
+          <div class="tw-progress-group">${rows}</div>
+          <p class="tw-unlock-note">${escapeHtml(t(loc, 'next_unlock'))} <strong>${unlocks}</strong></p>
         `;
       }
     }
 
-    // 2. タイル Inspector 更新
+    // 2. セル観測値 (Inspector) 更新
     const idx = this.world.idx(this.hoverX, this.hoverY);
     const mat = this.world.type[idx] as MatId;
     const bg = this.world.bgType[idx];
@@ -946,20 +1074,22 @@ export class TerraWeaveApp {
                 ? 'bg_core'
                 : 'bg_none';
 
+    const tileText = mat === Mat.Air ? t(loc, 'insp_air') : matLabel[loc];
+
     this.inspectorBodyEl.innerHTML = `
-      <span>${t(loc, 'insp_pos')}</span><span>(${this.hoverX}, ${this.hoverY})</span>
-      <span>${t(loc, 'insp_tile')}</span><span>${matLabel.icon} ${matLabel[loc]}</span>
-      <span>${t(loc, 'insp_bg')}</span><span>${t(loc, bgKey)}</span>
-      <span>${t(loc, 'insp_temp')}</span><span>${this.world.temp[idx]} °C</span>
-      <span>${t(loc, 'insp_charge')}</span><span>⚡${this.world.charge[idx]} / M:${this.world.meta[idx]}</span>
+      <span>${escapeHtml(t(loc, 'insp_pos'))}</span><span>${this.hoverX}, ${this.hoverY}</span>
+      <span>${escapeHtml(t(loc, 'insp_tile'))}</span><span>${escapeHtml(tileText)}</span>
+      <span>${escapeHtml(t(loc, 'insp_bg'))}</span><span>${escapeHtml(t(loc, bgKey))}</span>
+      <span>${escapeHtml(t(loc, 'insp_temp'))}</span><span>${this.world.temp[idx]} °C</span>
+      <span>${escapeHtml(t(loc, 'insp_charge'))}</span><span>${this.world.charge[idx]} V / ${this.world.meta[idx]}</span>
     `;
 
-    // 3. スプライト数表示
+    // 3. スプライト個体数更新
     const counts = this.sprites.countByKind();
     this.spriteBodyEl.innerHTML = `
-      <span>${t(loc, 'sprite_aqua')}</span><span>${counts.aqua_puff}</span>
-      <span>${t(loc, 'sprite_root')}</span><span>${counts.root_roller}</span>
-      <span>${t(loc, 'sprite_spark')}</span><span>${counts.spark_bit}</span>
+      <span>${escapeHtml(t(loc, 'sprite_aqua'))}</span><span>${counts.aqua_puff}</span>
+      <span>${escapeHtml(t(loc, 'sprite_root'))}</span><span>${counts.root_roller}</span>
+      <span>${escapeHtml(t(loc, 'sprite_spark'))}</span><span>${counts.spark_bit}</span>
     `;
   }
 
@@ -972,7 +1102,7 @@ export class TerraWeaveApp {
     } catch {
       // クリップボード権限がない環境ではURLハッシュ更新のみ完了
     }
-    this.showToast(t(this.locale, 'toast_copied'));
+    this.showToast(t(this.locale, 'toast_copied'), 'default');
   }
 
   private async downloadEmbeddedPngSnapshot(): Promise<void> {
@@ -991,7 +1121,7 @@ export class TerraWeaveApp {
     a.download = `terra-weave-day${this.world.dayCount}.png`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-    this.showToast(t(this.locale, 'toast_png_saved'));
+    this.showToast(t(this.locale, 'toast_png_saved'), 'default');
   }
 
   private async importWorldFromPngFile(file: File): Promise<void> {
@@ -999,16 +1129,19 @@ export class TerraWeaveApp {
     const code = extractWorldFromPng(bytes);
     if (code && deserializeWorld(code, this.world, this.progression)) {
       this.sprites.clear();
-      this.showToast(t(this.locale, 'toast_loaded'));
+      this.showToast(t(this.locale, 'toast_loaded'), 'default');
       this.refreshStaticUI();
     } else {
-      this.showToast(t(this.locale, 'toast_load_err'));
+      this.showToast(t(this.locale, 'toast_load_err'), 'error');
     }
   }
 
-  private showToast(msg: string): void {
+  private showToast(msg: string, tone: 'default' | 'warning' | 'error' = 'default'): void {
     this.toastEl.textContent = msg;
-    this.toastEl.classList.add('visible');
+    this.toastEl.className = 'tw-toast visible';
+    if (tone === 'warning') this.toastEl.classList.add('is-warning');
+    if (tone === 'error') this.toastEl.classList.add('is-error');
+
     if (this.toastTimer !== null) {
       window.clearTimeout(this.toastTimer);
     }

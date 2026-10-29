@@ -98,3 +98,76 @@
 ## Final Principle
 
 **Preserve the core gameplay pillars, follow the project specifications, and prioritize correct, verifiable implementation over speculative complexity.**
+
+## UI Design System
+
+### Visual Direction
+- Use a restrained, functional interface inspired by
+  ecological observation instruments and field equipment.
+- The game world is the primary visual element.
+  UI must not compete with the simulation.
+- Avoid generic SaaS dashboard aesthetics.
+
+### Strictly Prohibited
+- No emoji as UI icons.
+- No gradients.
+- No pill-shaped buttons, badges, tabs, or borders.
+- No excessive rounded cards, glow effects, neon effects,
+  glassmorphism, or decorative shadows.
+- No decoration without a clear functional purpose.
+- Do not add a card around every individual UI element.
+
+### Shape and Layout
+- Use mostly rectangular geometry.
+- Panel border-radius: 4px maximum.
+- Button border-radius: 3px maximum.
+- Use 1px solid borders and subtle separators.
+- Use a consistent spacing scale: 4, 8, 12, 16, 24px.
+- Group related controls without enclosing everything in cards.
+- Keep the main simulation area visually dominant.
+
+### Color Tokens
+- Background: #242A25
+- Surface: #2E352F
+- Border: #4B554D
+- Primary text: #E6E8DC
+- Secondary text: #A8B0A2
+- Accent: #A4B879
+- Warning: #D6A45F
+- Danger: #C96F63
+
+- Use solid colors only.
+- Use the accent color sparingly for selected states,
+  important actions, and key indicators.
+- Avoid using multiple accent colors for decoration.
+- All UI colors must use shared design tokens.
+
+### Typography
+- Use one consistent font family.
+- Establish a clear hierarchy between headings, body text,
+  labels, and numerical values.
+- Avoid excessive font weights and oversized headings.
+- Prefer compact, legible labels over decorative typography.
+
+### Icons
+- Use a consistent set of SVG icons with matching stroke width.
+- Prefer simple, monochrome icons.
+- If no appropriate icon exists, use a text label instead.
+- Never substitute emoji for missing icons.
+
+### Interaction States
+- Hover: subtle background change.
+- Selected: accent border or restrained accent fill.
+- Pressed: clear but minimal visual feedback.
+- Disabled: reduced contrast.
+- Focus: visible and consistent focus indicator.
+- Never use glow or gradient effects to indicate state.
+
+### Implementation Rules
+- Inspect existing UI components and styles before editing.
+- Create or consolidate shared design tokens first.
+- Refactor existing components instead of adding
+  another independent styling system.
+- Preserve gameplay logic and existing interactions.
+- Apply the new design to the main gameplay screen first.
+- Verify that every UI component follows these rules.

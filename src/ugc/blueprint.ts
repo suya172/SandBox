@@ -222,7 +222,7 @@ function createBuiltinBlueprints(): BlueprintData[] {
   return [
     {
       id: 'preset_greenhouse',
-      name: '🌿 Glass Greenhouse',
+      name: 'Glass Greenhouse',
       width: w1,
       height: h1,
       types: t1,
@@ -231,7 +231,7 @@ function createBuiltinBlueprints(): BlueprintData[] {
     },
     {
       id: 'preset_rotor',
-      name: '⚡ Rotor Generator',
+      name: 'Rotor Generator',
       width: w2,
       height: h2,
       types: t2,
