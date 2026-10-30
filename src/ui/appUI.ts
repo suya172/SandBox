@@ -1,8 +1,8 @@
 import { SoundEngine } from '../audio/soundEngine';
-import { BgMat, Mat, MatId } from '../core/materials';
+import { BgMat, MAT_HARDNESS, Mat, MatId } from '../core/materials';
 import { stepSimulation } from '../core/simulation';
 import { GameMode, generateTerrain } from '../core/terrainGen';
-import { HEIGHT, WIDTH, WorldGrid } from '../core/world';
+import { FLAG_INDESTRUCTIBLE, FLAG_RUIN, HEIGHT, WIDTH, WorldGrid } from '../core/world';
 import { SpriteManager } from '../entities/sprites';
 import { ProgressionManager } from '../modes/alchemist';
 import { Storyteller, WeatherKind } from '../modes/storyteller';
@@ -13,9 +13,14 @@ import { stepPowerAndMachines } from '../systems/power';
 import { BlueprintManager } from '../ugc/blueprint';
 import { embedWorldIntoPng, extractWorldFromPng } from '../ugc/pngStego';
 import { deserializeWorld, serializeWorld } from '../ugc/serializer';
-import { createUIButton, escapeHtml, InputModalController } from './components';
+import {
+  CollapseModalController,
+  createUIButton,
+  escapeHtml,
+  InputModalController,
+} from './components';
 import { DictKey, Locale, MATERIAL_LABELS, t } from './i18n';
-import { applyBrush } from './viewport';
+import { applyHybridBrush } from './viewport';
 
 const DISPLAY_SCALE = 4;
 const DISPLAY_W = WIDTH * DISPLAY_SCALE;   // 1024
@@ -40,6 +45,7 @@ export class TerraWeaveApp {
   readonly storyteller = new Storyteller();
   readonly blueprints = new BlueprintManager();
   readonly modal = new InputModalController();
+  readonly collapseModal = new CollapseModalController();
 
   locale: Locale = 'ja';
   selectedMat: MatId = Mat.Water;
@@ -51,7 +57,7 @@ export class TerraWeaveApp {
   panX: number = 0;
   panY: number = 0;
 
-  // マウス入力状態
+  // マウス入力・フィードバック状態
   private hoverX: number = 128;
   private hoverY: number = 72;
   private isPointerInside: boolean = false;
@@ -61,6 +67,9 @@ export class TerraWeaveApp {
   private isSpaceDown: boolean = false;
   private lastClientX: number = 0;
   private lastClientY: number = 0;
+  private blockedCursorUntil: number = 0;
+  private lastCoreHitAt: number = 0;
+  private transientHintTimer: number | null = null;
 
   // ブループリント範囲選択状態
   private isCapturingBp: boolean = false;
@@ -84,12 +93,18 @@ export class TerraWeaveApp {
   private dropOverlayEl!: HTMLElement;
 
   // 動的更新用DOM参照
+  private readoutStripEl!: HTMLElement;
   private timeReadoutEl!: HTMLElement;
   private weatherReadoutEl!: HTMLElement;
+  private vitalityStripEl: HTMLElement | null = null;
+  private tierBadgeEl: HTMLElement | null = null;
+  private vitalityFillEl: HTMLElement | null = null;
+  private vitalityNumEl: HTMLElement | null = null;
   private goalBodyEl!: HTMLElement;
   private inspectorBodyEl!: HTMLElement;
   private spriteBodyEl!: HTMLElement;
   private bpListEl!: HTMLElement;
+  private readonly stockBadgeEls = new Map<MatId, { btn: HTMLButtonElement; badge: HTMLElement }>();
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -110,20 +125,63 @@ export class TerraWeaveApp {
     }
   }
 
+  private isAnyModalOpen(): boolean {
+    return this.modal.isOpen() || this.collapseModal.isOpen();
+  }
+
   private setupCoreCallbacks(): void {
+    this.world.onDawn = (dayCount) => {
+      if (this.progression.mode === 'alchemist') {
+        this.progression.checkTierPromotion(dayCount);
+        this.world.saveDawnSnapshot();
+        this.progression.saveDawnState();
+      }
+      this.updateHeaderReadouts();
+      this.updateSidebarDynamic();
+    };
+
     this.world.onCoreDeliver = (kind, amount) => {
-      this.progression.recordDelivery(kind, amount);
+      this.progression.recordDelivery(kind, amount, this.world.dayCount);
+    };
+
+    this.world.onCoreDamaged = (_damage, remaining) => {
+      this.lastCoreHitAt = performance.now();
+      if (remaining <= 0 && !this.collapseModal.isOpen()) {
+        this.sound.playAlertTone('collapse');
+        this.simSpeed = 0;
+        this.refreshStaticUI();
+        this.openCollapseModal();
+      } else if (remaining > 0) {
+        this.sound.playAlertTone('damage');
+        this.updateHeaderReadouts();
+      }
     };
 
     this.progression.onDeliver = () => {
       this.sound.playChime('deliver');
     };
 
-    this.progression.onStageUnlocked = (_stage, unlocked) => {
+    this.progression.onTierUnlocked = (newTier, unlocked) => {
       this.sound.playChime('unlock');
       const names = unlocked.map((m) => MATERIAL_LABELS[m][this.locale]).join(', ');
-      this.showToast(`${t(this.locale, 'toast_unlocked')} ${names}`, 'default');
+      this.showToast(`Tier ${newTier} — ${t(this.locale, 'toast_tier_unlocked')} ${names}`, 'default');
       this.refreshStaticUI();
+    };
+
+    this.progression.onInfiniteUnlocked = (mat) => {
+      this.sound.playChime('unlock');
+      const label = MATERIAL_LABELS[mat][this.locale];
+      this.showToast(`${t(this.locale, 'toast_inf_unlocked')} ${label}`, 'default');
+      this.updatePaletteStocks();
+    };
+
+    this.storyteller.onRaidStart = (_phase, isEclipse) => {
+      this.sound.playAlertTone('dusk');
+      this.showToast(
+        t(this.locale, isEclipse ? 'toast_eclipse' : 'toast_raid_start'),
+        isEclipse ? 'error' : 'warning'
+      );
+      this.updateHeaderReadouts();
     };
 
     this.storyteller.onWeatherChange = (weather) => {
@@ -136,11 +194,42 @@ export class TerraWeaveApp {
     };
   }
 
+  private openCollapseModal(): void {
+    const loc = this.locale;
+    this.collapseModal.open({
+      title: t(loc, 'collapse_title'),
+      description: t(loc, 'collapse_desc'),
+      retryLabel: t(loc, 'btn_retry_dawn'),
+      newWorldLabel: t(loc, 'btn_collapse_new'),
+      onRetryDawn: () => {
+        if (this.world.hasDawnSnapshot()) {
+          this.world.restoreDawnSnapshot();
+          this.progression.restoreDawnState();
+        } else {
+          this.world.coreVitality = this.world.maxCoreVitality;
+        }
+        this.sprites.clearMites();
+        this.storyteller.reset();
+        this.simSpeed = 1;
+        this.showToast(t(this.locale, 'toast_dawn_restored'), 'default');
+        this.refreshStaticUI();
+      },
+      onNewWorld: () => {
+        this.simSpeed = 1;
+        this.startNewWorld('alchemist');
+      },
+    });
+  }
+
   private initInitialWorld(): void {
     if (window.location.hash.startsWith('#world=')) {
       const ok = deserializeWorld(window.location.hash, this.world, this.progression);
       if (ok) {
         this.sprites.clear();
+        if (this.progression.mode === 'alchemist') {
+          this.world.saveDawnSnapshot();
+          this.progression.saveDawnState();
+        }
         return;
       }
     }
@@ -149,10 +238,14 @@ export class TerraWeaveApp {
 
   startNewWorld(mode: GameMode, seed?: number): void {
     const nextSeed = seed ?? ((Math.random() * 0x7fffffff) | 0);
+    this.collapseModal.close();
     this.progression.reset(mode);
     this.storyteller.reset();
     this.sprites.clear();
     generateTerrain(this.world, mode, nextSeed);
+    if (mode === 'alchemist') {
+      this.progression.saveDawnState();
+    }
 
     if (!this.progression.isBrushUnlocked(this.selectedMat)) {
       this.selectedMat = Mat.Water;
@@ -200,7 +293,13 @@ export class TerraWeaveApp {
     this.dockEl = document.createElement('footer');
     this.dockEl.className = 'tw-dock';
 
-    this.root.append(this.headerEl, workspace, this.dockEl, this.modal.backdropEl);
+    this.root.append(
+      this.headerEl,
+      workspace,
+      this.dockEl,
+      this.modal.backdropEl,
+      this.collapseModal.backdropEl
+    );
   }
 
   /**
@@ -212,6 +311,10 @@ export class TerraWeaveApp {
 
     // 1. トップ観測機器バー (HUD Header)
     this.headerEl.innerHTML = '';
+    this.vitalityStripEl = null;
+    this.tierBadgeEl = null;
+    this.vitalityFillEl = null;
+    this.vitalityNumEl = null;
 
     const brand = document.createElement('div');
     brand.className = 'tw-brand';
@@ -241,24 +344,59 @@ export class TerraWeaveApp {
       })
     );
 
-    const readoutStrip = document.createElement('div');
-    readoutStrip.className = 'tw-readout-strip';
+    this.readoutStripEl = document.createElement('div');
+    this.readoutStripEl.className = 'tw-readout-strip';
     this.timeReadoutEl = document.createElement('span');
     this.timeReadoutEl.className = 'tw-readout-item';
     const sep = document.createElement('span');
     sep.className = 'tw-divider-v';
     this.weatherReadoutEl = document.createElement('span');
     this.weatherReadoutEl.className = 'tw-readout-item';
-    readoutStrip.append(this.timeReadoutEl, sep, this.weatherReadoutEl);
+    this.readoutStripEl.append(this.timeReadoutEl, sep, this.weatherReadoutEl);
 
-    center.append(modeSeg, readoutStrip);
+    center.append(modeSeg, this.readoutStripEl);
 
-    // Cozy Mode または 天候アンテナ解放時は矩形セグメントの天候トリガーを表示（絵文字不使用）
-    if (
+    // Alchemist Mode 時：ツールティア & テラリウム・コア活力計器を表示
+    if (this.progression.mode === 'alchemist') {
+      const vitStrip = document.createElement('div');
+      vitStrip.className = 'tw-vitality-strip';
+
+      const tierBadge = document.createElement('span');
+      tierBadge.className = 'tw-tier-badge';
+      tierBadge.textContent = `Tier ${this.progression.toolTier}`;
+
+      const sepV = document.createElement('span');
+      sepV.className = 'tw-divider-v';
+
+      const vitLabel = document.createElement('span');
+      vitLabel.className = 'tw-readout-muted';
+      vitLabel.textContent = t(loc, 'core_vitality');
+
+      const meter = document.createElement('div');
+      meter.className = 'tw-vitality-meter';
+      const fill = document.createElement('div');
+      fill.className = 'tw-vitality-fill';
+      meter.appendChild(fill);
+
+      const num = document.createElement('span');
+      num.className = 'tw-vitality-num';
+
+      vitStrip.append(tierBadge, sepV, vitLabel, meter, num);
+      center.appendChild(vitStrip);
+
+      this.vitalityStripEl = vitStrip;
+      this.tierBadgeEl = tierBadge;
+      this.vitalityFillEl = fill;
+      this.vitalityNumEl = num;
+    }
+
+    const skyControlUnlocked =
       this.progression.mode === 'cozy' ||
-      this.progression.stage > 5 ||
-      this.storyteller.lastStats.hasActiveAntenna
-    ) {
+      this.progression.toolTier >= 4 ||
+      this.storyteller.lastStats.hasActiveAntenna;
+
+    // Cozy Mode または 天候アンテナ / Tier 4 解放時は矩形セグメントの天候トリガーを表示（絵文字不使用）
+    if (skyControlUnlocked) {
       const wSeg = document.createElement('div');
       wSeg.className = 'tw-seg';
       const weathers: WeatherKind[] = ['clear', 'monsoon', 'heatwave', 'starfall'];
@@ -277,6 +415,34 @@ export class TerraWeaveApp {
         );
       }
       center.appendChild(wSeg);
+
+      // Alchemist Mode で環境支配（Tier 4 または 天候アンテナ稼働）に到達したら夜間襲撃 ON/OFF も任意切替可能
+      if (this.progression.mode === 'alchemist') {
+        const raidSeg = document.createElement('div');
+        raidSeg.className = 'tw-seg';
+        raidSeg.append(
+          createUIButton({
+            label: `${t(loc, 'raid_label')} ${t(loc, 'raid_on')}`,
+            variant: 'segment',
+            active: this.progression.raidsEnabled,
+            onClick: () => {
+              this.progression.raidsEnabled = true;
+              this.refreshStaticUI();
+            },
+          }),
+          createUIButton({
+            label: t(loc, 'raid_off'),
+            variant: 'segment',
+            active: !this.progression.raidsEnabled,
+            onClick: () => {
+              this.progression.raidsEnabled = false;
+              this.sprites.clearMites();
+              this.refreshStaticUI();
+            },
+          })
+        );
+        center.appendChild(raidSeg);
+      }
     }
 
     const right = document.createElement('div');
@@ -419,20 +585,44 @@ export class TerraWeaveApp {
 
     // 3. 下部マテリアルパレット＆操作ドック
     this.dockEl.innerHTML = '';
+    this.stockBadgeEls.clear();
     const brushRow = document.createElement('div');
     brushRow.className = 'tw-brushes';
 
-    const available = this.progression.getAvailableBrushes();
-    for (let i = 0; i < available.length; i++) {
-      const mat = available[i];
+    const paletteItems = this.progression.getPaletteDisplayBrushes();
+    for (let i = 0; i < paletteItems.length; i++) {
+      const item = paletteItems[i];
+      const mat = item.mat;
       const info = MATERIAL_LABELS[mat];
       const btn = document.createElement('button');
       btn.type = 'button';
+
+      if (!item.unlocked) {
+        btn.disabled = true;
+        btn.className = 'tw-brush-btn is-locked-preview';
+        const suffix = t(loc, 'locked_preview_suffix');
+        btn.title = `${info[loc]} — ${t(loc, 'locked_preview_prefix')} ${item.requiredTier}${suffix ? ` ${suffix}` : ''}`;
+        btn.innerHTML = `<span>${escapeHtml(info[loc])}</span><span class="tw-brush-tier-req">T${item.requiredTier}</span>`;
+        brushRow.appendChild(btn);
+        continue;
+      }
+
       const isSelected = !this.blueprints.activeBlueprintId && this.selectedMat === mat;
       btn.className = `tw-brush-btn${isSelected ? ' is-selected' : ''}`;
       btn.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
-      btn.textContent = info[loc];
       btn.title = loc === 'ja' ? info.hintJa : info.hintEn;
+
+      const labelSpan = document.createElement('span');
+      labelSpan.textContent = info[loc];
+      btn.appendChild(labelSpan);
+
+      if (this.progression.mode === 'alchemist' && mat !== Mat.Air) {
+        const badgeSpan = document.createElement('span');
+        badgeSpan.className = 'tw-brush-stock';
+        btn.appendChild(badgeSpan);
+        this.stockBadgeEls.set(mat, { btn, badge: badgeSpan });
+      }
+
       btn.addEventListener('click', () => {
         this.sound.unlock();
         this.selectedMat = mat;
@@ -443,13 +633,15 @@ export class TerraWeaveApp {
       });
       brushRow.appendChild(btn);
 
-      // 消去ツール (Mat.Air) と生成マテリアルの間に控えめな縦セパレータを置く
-      if (mat === Mat.Air && available.length > 1) {
+      // 吸引/消去ツール (Mat.Air) と生成マテリアルの間に控えめな縦セパレータを置く
+      if (mat === Mat.Air && paletteItems.length > 1) {
         const div = document.createElement('span');
         div.className = 'tw-divider-v';
         brushRow.appendChild(div);
       }
     }
+
+    this.updatePaletteStocks();
 
     const ctrlRow = document.createElement('div');
     ctrlRow.className = 'tw-dock-controls';
@@ -582,6 +774,25 @@ export class TerraWeaveApp {
     this.updateSidebarDynamic();
   }
 
+  /**
+   * パレット各ボタンの所持ストック数値 / INF 表示のみを軽量に差分更新する
+   */
+  private updatePaletteStocks(): void {
+    if (this.progression.mode !== 'alchemist') return;
+    for (const [mat, refs] of this.stockBadgeEls) {
+      const eff = this.progression.getEffectiveStock(mat);
+      if (eff.infinite) {
+        refs.badge.textContent = 'INF';
+        refs.badge.className = 'tw-brush-stock is-inf';
+        refs.btn.classList.remove('is-depleted');
+      } else {
+        refs.badge.textContent = `${eff.count}`;
+        refs.badge.className = eff.count === 0 ? 'tw-brush-stock is-zero' : 'tw-brush-stock';
+        refs.btn.classList.toggle('is-depleted', eff.count === 0);
+      }
+    }
+  }
+
   private renderBlueprintItems(): void {
     this.bpListEl.innerHTML = '';
     for (const bp of this.blueprints.blueprints) {
@@ -612,6 +823,11 @@ export class TerraWeaveApp {
         const ok = deserializeWorld(code, this.world, this.progression);
         if (ok) {
           this.sprites.clear();
+          this.storyteller.reset();
+          if (this.progression.mode === 'alchemist') {
+            this.world.saveDawnSnapshot();
+            this.progression.saveDawnState();
+          }
           this.showToast(t(this.locale, 'toast_loaded'), 'default');
           this.refreshStaticUI();
         } else {
@@ -622,6 +838,10 @@ export class TerraWeaveApp {
   }
 
   private updateFloatingHint(): void {
+    if (this.transientHintTimer !== null) {
+      window.clearTimeout(this.transientHintTimer);
+      this.transientHintTimer = null;
+    }
     if (this.isCapturingBp) {
       this.floatingHintEl.textContent = t(this.locale, 'bp_capturing_hint');
       this.floatingHintEl.hidden = false;
@@ -630,10 +850,28 @@ export class TerraWeaveApp {
     }
   }
 
+  private showTransientHint(msg: string): void {
+    if (this.isCapturingBp) return;
+    this.floatingHintEl.textContent = msg;
+    this.floatingHintEl.hidden = false;
+    if (this.transientHintTimer !== null) {
+      window.clearTimeout(this.transientHintTimer);
+    }
+    this.transientHintTimer = window.setTimeout(() => {
+      this.transientHintTimer = null;
+      if (!this.isCapturingBp) {
+        this.floatingHintEl.hidden = true;
+      }
+    }, 1600);
+  }
+
   private bindEvents(): void {
     window.addEventListener('keydown', (e) => {
       if (this.modal.isOpen()) {
         if (e.key === 'Escape') this.modal.close(false);
+        return;
+      }
+      if (this.collapseModal.isOpen()) {
         return;
       }
       if (e.code === 'Space') {
@@ -659,7 +897,7 @@ export class TerraWeaveApp {
     });
 
     this.canvas.addEventListener('pointerdown', (e) => {
-      if (this.modal.isOpen()) return;
+      if (this.isAnyModalOpen()) return;
       this.sound.unlock();
       this.canvas.setPointerCapture(e.pointerId);
       const pos = this.clientToGrid(e.clientX, e.clientY);
@@ -689,6 +927,9 @@ export class TerraWeaveApp {
         );
         if (placed > 0) {
           this.sound.playChime('deliver');
+          this.updatePaletteStocks();
+        } else if (this.progression.mode === 'alchemist') {
+          this.showTransientHint(t(this.locale, 'hint_out_of_stock'));
         }
         return;
       }
@@ -835,17 +1076,37 @@ export class TerraWeaveApp {
   }
 
   private paintAt(gx: number, gy: number): void {
-    const matToUse = this.drawButton === 2 ? Mat.Air : this.selectedMat;
-    const count = applyBrush(
+    const isHarvest = this.drawButton === 2 || this.selectedMat === Mat.Air;
+    const res = applyHybridBrush(
       this.world,
+      this.progression,
       gx,
       gy,
       this.brushRadius,
-      matToUse,
-      this.progression.mode === 'alchemist'
+      this.selectedMat,
+      isHarvest ? 'harvest' : 'place'
     );
-    if (count > 0) {
-      this.sound.playBrushSound(matToUse);
+
+    if (res.changedCount > 0) {
+      if (isHarvest && this.progression.mode === 'alchemist') {
+        this.sound.playHarvestSound();
+      } else {
+        this.sound.playBrushSound(isHarvest ? Mat.Air : this.selectedMat);
+      }
+      if (this.progression.mode === 'alchemist') {
+        this.updatePaletteStocks();
+      }
+    }
+
+    if (res.blockedTier > 0) {
+      this.blockedCursorUntil = performance.now() + 650;
+      this.sound.playHardnessBlocked();
+      this.showTransientHint(
+        t(this.locale, res.blockedTier >= 3 ? 'hint_req_tier_3' : 'hint_req_tier_2')
+      );
+    } else if (res.outOfStock && res.changedCount === 0) {
+      this.blockedCursorUntil = performance.now() + 500;
+      this.showTransientHint(t(this.locale, 'hint_out_of_stock'));
     }
   }
 
@@ -853,6 +1114,8 @@ export class TerraWeaveApp {
    * メインの 60FPS シミュレーション＆レンダリングループ
    */
   private loop = (): void => {
+    const prevAntenna = this.storyteller.lastStats.hasActiveAntenna;
+
     for (let step = 0; step < this.simSpeed; step++) {
       stepSimulation(this.world);
       stepPowerAndMachines(this.world);
@@ -861,6 +1124,12 @@ export class TerraWeaveApp {
       }
       this.sprites.update(this.world);
       this.storyteller.update(this.world, this.sprites, this.progression);
+      if (this.collapseModal.isOpen()) break;
+    }
+
+    // 天候アンテナが新たに設置された場合はヘッダー制御スイッチを即座に有効化
+    if (!prevAntenna && this.storyteller.lastStats.hasActiveAntenna) {
+      this.refreshStaticUI();
     }
 
     if (this.world.tick % 15 === 0) {
@@ -882,6 +1151,7 @@ export class TerraWeaveApp {
     if ((this.frameCounter & 7) === 0) {
       this.updateHeaderReadouts();
       this.updateSidebarDynamic();
+      this.updatePaletteStocks();
     }
 
     requestAnimationFrame(this.loop);
@@ -934,7 +1204,7 @@ export class TerraWeaveApp {
     );
     this.ctx.restore();
 
-    if (this.isPointerInside && !this.modal.isOpen()) {
+    if (this.isPointerInside && !this.isAnyModalOpen()) {
       this.renderCursorOverlay(viewW, viewH);
     }
   }
@@ -982,9 +1252,16 @@ export class TerraWeaveApp {
 
     const cx = toScreenX(this.hoverX + 0.5);
     const cy = toScreenY(this.hoverY + 0.5);
-    const rPx = Math.max(cellScreenW * 0.5, (this.brushRadius + 0.5) * cellScreenW);
-    this.ctx.strokeStyle = TOKEN_COLOR_TEXT_PRIMARY;
-    this.ctx.lineWidth = 1;
+    const effRadius =
+      this.progression.mode === 'alchemist' &&
+      this.progression.toolTier === 1 &&
+      (this.drawButton === 2 || this.selectedMat === Mat.Air)
+        ? Math.min(this.brushRadius, 3)
+        : this.brushRadius;
+    const rPx = Math.max(cellScreenW * 0.5, (effRadius + 0.5) * cellScreenW);
+    const isBlockedNow = performance.now() < this.blockedCursorUntil;
+    this.ctx.strokeStyle = isBlockedNow ? TOKEN_COLOR_WARNING : TOKEN_COLOR_TEXT_PRIMARY;
+    this.ctx.lineWidth = isBlockedNow ? 1.5 : 1;
     this.ctx.beginPath();
     this.ctx.arc(cx, cy, rPx, 0, Math.PI * 2);
     this.ctx.stroke();
@@ -994,6 +1271,7 @@ export class TerraWeaveApp {
   private updateHeaderReadouts(): void {
     const loc = this.locale;
     const tod = this.world.timeOfDay;
+    const isNight = this.world.isNight();
     const phaseKey: DictKey =
       tod < 0.2 || tod >= 0.82
         ? 'time_night'
@@ -1004,6 +1282,20 @@ export class TerraWeaveApp {
             : 'time_evening';
 
     this.timeReadoutEl.textContent = `${t(loc, 'day_prefix')} ${this.world.dayCount} · ${t(loc, phaseKey)}`;
+    const isRaidNight =
+      this.progression.mode === 'alchemist' && this.progression.raidsEnabled && isNight;
+
+    this.timeReadoutEl.className = isRaidNight
+      ? this.storyteller.isEclipseNight
+        ? 'tw-readout-item is-danger'
+        : 'tw-readout-item is-warning'
+      : 'tw-readout-item';
+
+    this.readoutStripEl.className = isRaidNight
+      ? this.storyteller.isEclipseNight
+        ? 'tw-readout-strip is-eclipse'
+        : 'tw-readout-strip is-raid'
+      : 'tw-readout-strip';
 
     const wKey = `weather_${this.storyteller.currentWeather}` as DictKey;
     this.weatherReadoutEl.textContent = t(loc, wKey);
@@ -1011,6 +1303,27 @@ export class TerraWeaveApp {
       this.storyteller.currentWeather !== 'clear'
         ? 'tw-readout-item is-warning'
         : 'tw-readout-muted';
+
+    if (
+      this.progression.mode === 'alchemist' &&
+      this.vitalityStripEl &&
+      this.tierBadgeEl &&
+      this.vitalityFillEl &&
+      this.vitalityNumEl
+    ) {
+      const vit = Math.max(0, Math.min(100, Math.round(this.world.coreVitality)));
+      const recentlyHit = performance.now() - this.lastCoreHitAt < 900;
+      const isDanger = vit <= 35 || recentlyHit;
+
+      this.tierBadgeEl.textContent = `Tier ${this.progression.toolTier}`;
+      this.vitalityFillEl.style.width = `${vit}%`;
+      this.vitalityFillEl.className = isDanger ? 'tw-vitality-fill is-danger' : 'tw-vitality-fill';
+      this.vitalityNumEl.textContent = `${vit}%`;
+      this.vitalityNumEl.className = isDanger ? 'tw-vitality-num is-danger' : 'tw-vitality-num';
+      this.vitalityStripEl.className = isDanger
+        ? 'tw-vitality-strip is-critical'
+        : 'tw-vitality-strip';
+    }
   }
 
   private updateSidebarDynamic(): void {
@@ -1027,30 +1340,30 @@ export class TerraWeaveApp {
         </ul>
       `;
     } else {
-      const st = this.progression.getCurrentStageDef();
-      if (!st) {
-        this.goalBodyEl.innerHTML = `<p class="tw-status-complete">${escapeHtml(t(loc, 'all_stages_done'))}</p>`;
+      const ms = this.progression.getCurrentMilestoneView(this.world.dayCount);
+      if (!ms) {
+        this.goalBodyEl.innerHTML = `<p class="tw-status-complete">${escapeHtml(t(loc, 'tier_4_done'))}</p>`;
       } else {
-        const rows = st.requirements
-          .map((req) => {
-            const cur = this.progression.progress[req.kind];
-            const pct = Math.min(100, Math.round((cur / req.target) * 100));
-            const label = escapeHtml(t(loc, `req_${req.kind}` as DictKey));
+        const rows = ms.bars
+          .map((b) => {
+            const pct = Math.min(100, Math.round((b.current / b.target) * 100));
+            const label = escapeHtml(t(loc, b.labelKey as DictKey));
             return `
               <div class="tw-progress-row">
-                <div class="tw-progress-label"><span>${label}</span><span>${cur} / ${req.target}</span></div>
+                <div class="tw-progress-label"><span>${label}</span><span>${b.current} / ${b.target}</span></div>
                 <div class="tw-progress-bar"><div class="tw-progress-fill" style="width:${pct}%"></div></div>
               </div>
             `;
           })
           .join('');
-        const unlocks = st.unlockedBrushes
+        const unlocks = ms.nextUnlockMats
           .map((m) => escapeHtml(MATERIAL_LABELS[m][loc]))
           .join(', ');
         this.goalBodyEl.innerHTML = `
-          <div class="tw-stage-title">${escapeHtml(t(loc, st.titleKey as DictKey))}</div>
-          <p class="tw-body-text">${escapeHtml(t(loc, st.descKey as DictKey))}</p>
+          <div class="tw-stage-title">${escapeHtml(t(loc, ms.titleKey as DictKey))}</div>
+          <p class="tw-body-text">${escapeHtml(t(loc, ms.descKey as DictKey))}</p>
           <div class="tw-progress-group">${rows}</div>
+          <p class="tw-law-note">${escapeHtml(t(loc, ms.lawKey as DictKey))}</p>
           <p class="tw-unlock-note">${escapeHtml(t(loc, 'next_unlock'))} <strong>${unlocks}</strong></p>
         `;
       }
@@ -1060,6 +1373,7 @@ export class TerraWeaveApp {
     const idx = this.world.idx(this.hoverX, this.hoverY);
     const mat = this.world.type[idx] as MatId;
     const bg = this.world.bgType[idx];
+    const flags = this.world.flags[idx];
     const matLabel = MATERIAL_LABELS[mat];
     const bgKey: DictKey =
       bg === BgMat.WoodPillar
@@ -1075,11 +1389,32 @@ export class TerraWeaveApp {
                 : 'bg_none';
 
     const tileText = mat === Mat.Air ? t(loc, 'insp_air') : matLabel[loc];
+    const hVal = MAT_HARDNESS[mat];
+    let hardnessText = `H${hVal}`;
+    let hardnessWarn = false;
+    if (mat !== Mat.Air) {
+      if ((flags & FLAG_INDESTRUCTIBLE) !== 0) {
+        hardnessText = t(loc, 'hardness_indestructible');
+      } else if (
+        this.progression.mode === 'alchemist' &&
+        (flags & FLAG_RUIN) !== 0 &&
+        this.progression.toolTier < 3
+      ) {
+        hardnessText = t(loc, 'hardness_ruin_locked');
+        hardnessWarn = true;
+      } else if (this.progression.mode === 'alchemist' && hVal > this.progression.toolTier) {
+        hardnessText = `H${hVal} (${t(loc, 'hardness_req_prefix')} ${hVal})`;
+        hardnessWarn = true;
+      } else {
+        hardnessText = `H${hVal} (${t(loc, 'hardness_ok')})`;
+      }
+    }
 
     this.inspectorBodyEl.innerHTML = `
       <span>${escapeHtml(t(loc, 'insp_pos'))}</span><span>${this.hoverX}, ${this.hoverY}</span>
       <span>${escapeHtml(t(loc, 'insp_tile'))}</span><span>${escapeHtml(tileText)}</span>
       <span>${escapeHtml(t(loc, 'insp_bg'))}</span><span>${escapeHtml(t(loc, bgKey))}</span>
+      <span>${escapeHtml(t(loc, 'insp_hardness'))}</span><span${hardnessWarn ? ' class="tw-val-warning"' : ''}>${escapeHtml(hardnessText)}</span>
       <span>${escapeHtml(t(loc, 'insp_temp'))}</span><span>${this.world.temp[idx]} °C</span>
       <span>${escapeHtml(t(loc, 'insp_charge'))}</span><span>${this.world.charge[idx]} V / ${this.world.meta[idx]}</span>
     `;
@@ -1090,6 +1425,7 @@ export class TerraWeaveApp {
       <span>${escapeHtml(t(loc, 'sprite_aqua'))}</span><span>${counts.aqua_puff}</span>
       <span>${escapeHtml(t(loc, 'sprite_root'))}</span><span>${counts.root_roller}</span>
       <span>${escapeHtml(t(loc, 'sprite_spark'))}</span><span>${counts.spark_bit}</span>
+      <span>${escapeHtml(t(loc, 'sprite_mite'))}</span><span${counts.shade_mite > 0 ? ' class="tw-val-warning"' : ''}>${counts.shade_mite}</span>
     `;
   }
 
@@ -1129,6 +1465,11 @@ export class TerraWeaveApp {
     const code = extractWorldFromPng(bytes);
     if (code && deserializeWorld(code, this.world, this.progression)) {
       this.sprites.clear();
+      this.storyteller.reset();
+      if (this.progression.mode === 'alchemist') {
+        this.world.saveDawnSnapshot();
+        this.progression.saveDawnState();
+      }
       this.showToast(t(this.locale, 'toast_loaded'), 'default');
       this.refreshStaticUI();
     } else {

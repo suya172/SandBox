@@ -194,7 +194,14 @@ function evaluateSensor(world: WorldGrid, cx: number, cy: number): boolean {
       if (!world.inBounds(gx, gy)) continue;
       const i = world.idx(gx, gy);
       const m = world.type[i];
-      if (m === Mat.Water || m === Mat.Steam || m === Mat.Nectar || world.temp[i] >= 80) {
+      if (
+        m === Mat.Water ||
+        m === Mat.BlightWater ||
+        m === Mat.Steam ||
+        m === Mat.Miasma ||
+        m === Mat.Nectar ||
+        world.temp[i] >= 80
+      ) {
         return true;
       }
     }
@@ -235,7 +242,7 @@ function runElectricPump(world: WorldGrid, px: number, py: number): void {
   for (const [ix, iy] of intakes) {
     if (!world.inBounds(ix, iy)) continue;
     const m = world.getMat(ix, iy);
-    if (m === Mat.Water || m === Mat.Nectar || m === Mat.Magma) {
+    if (m === Mat.Water || m === Mat.BlightWater || m === Mat.Nectar || m === Mat.Magma) {
       srcX = ix;
       srcY = iy;
       fluidMat = m;

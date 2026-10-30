@@ -70,5 +70,65 @@ describe('Phase 3: Autonomous Sprites Ecosystem & Automation FSM', () => {
 
     expect(world.charge[world.idx(62, 60)]).toBeGreaterThanOrEqual(150);
   });
+
+  it('夜行性のカゲむし (Shade-Mite) が無防備なコアに到達すると Vitality を削り、帯電銅線に触れると撃退され資源を落とすこと', () => {
+    const world = new WorldGrid(5400);
+    world.timeOfDay = 0.05; // 深夜
+    for (let x = 90; x <= 160; x++) {
+      world.setCell(x, 90, Mat.Stone);
+    }
+    placeTerrariumCore(world, 128, 87);
+    world.updateLightField();
+
+    const mgr = new SpriteManager();
+    // 1. 無防備なコア近傍（台座手前の地上）にカゲむしを配置 → コアへ歩いて到達し耐久が減少すること
+    mgr.spawn('shade_mite', 121, 89);
+    for (let t = 0; t < 90; t++) {
+      mgr.update(world);
+    }
+    expect(world.coreVitality).toBeLessThan(100);
+
+    // 2. 帯電した銅線フェンス (charge=180) を設置してカゲむしを歩かせる → 感電撃退され Ash または StarShard がドロップすること
+    mgr.clearMites();
+    world.setCell(105, 89, Mat.Copper);
+    world.charge[world.idx(105, 89)] = 180;
+    mgr.spawn('shade_mite', 105, 88);
+    mgr.update(world);
+
+    expect(mgr.countByKind().shade_mite).toBe(0);
+    let droppedResource = false;
+    for (let y = 87; y <= 89; y++) {
+      for (let x = 104; x <= 106; x++) {
+        const m = world.getMat(x, y);
+        if (m === Mat.Ash || m === Mat.StarShard) droppedResource = true;
+      }
+    }
+    expect(droppedResource).toBe(true);
+  });
+
+  it('カゲむしが強い光源（発光キノコ群）に照らされ続けると光忌避・浄化消散すること', () => {
+    const world = new WorldGrid(5500);
+    world.timeOfDay = 0.05; // 深夜
+    for (let x = 30; x <= 60; x++) {
+      world.setCell(x, 80, Mat.Stone);
+    }
+    // 両端を石壁で囲んだ発光キノコ防衛帯を敷設し、継続照射による浄化消散を検証
+    for (let y = 76; y <= 79; y++) {
+      world.setCell(35, y, Mat.Stone);
+      world.setCell(53, y, Mat.Stone);
+    }
+    for (const mx of [38, 42, 46, 50]) {
+      world.setCell(mx, 79, Mat.Mushroom);
+    }
+    world.updateLightField();
+
+    const mgr = new SpriteManager();
+    mgr.spawn('shade_mite', 45, 79);
+
+    for (let t = 0; t < 45; t++) {
+      mgr.update(world);
+    }
+    expect(mgr.countByKind().shade_mite).toBe(0);
+  });
 });
 

@@ -121,11 +121,18 @@ export class BlueprintManager {
         const bg = bp.bgTypes[idx] as BgMatId;
 
         if (mat !== Mat.Air && progression.isBrushUnlocked(mat)) {
-          world.setCell(gx, gy, mat, bp.metas[idx]);
-          if (mat === Mat.RotorHub) {
-            deployRotorBlades(world, gx, gy);
+          // Cozy Mode または Tier 4 以降は自由スタンプ、Tier 1〜3 では所持ストック範囲内で消費スタンプ
+          const canPlace =
+            progression.mode === 'cozy' ||
+            progression.toolTier >= 4 ||
+            progression.consumeForPlace(mat);
+          if (canPlace) {
+            world.setCell(gx, gy, mat, bp.metas[idx]);
+            if (mat === Mat.RotorHub) {
+              deployRotorBlades(world, gx, gy);
+            }
+            placed++;
           }
-          placed++;
         }
         if (bg !== BgMat.None && world.bgType[gi] === BgMat.None) {
           world.setBg(gx, gy, bg, 0);

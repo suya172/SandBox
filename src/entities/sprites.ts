@@ -1,10 +1,11 @@
 import { isSolidBlocking, Mat, MatId } from '../core/materials';
 import { HEIGHT, WIDTH, WorldGrid } from '../core/world';
 
-export type SpriteKind = 'aqua_puff' | 'root_roller' | 'spark_bit';
+export type SpriteKind = 'aqua_puff' | 'root_roller' | 'spark_bit' | 'shade_mite';
 export type SpriteState = 'wander' | 'seek' | 'deliver';
 
 export interface SpriteEntity {
+  active: boolean;
   id: number;
   kind: SpriteKind;
   x: number;
@@ -14,83 +15,175 @@ export interface SpriteEntity {
   facing: 1 | -1;
   state: SpriteState;
   carrying: MatId;     // 運搬中のマテリアル（Air なら未所持）
-  energy: number;      // ピカリんの帯電量または行動スタミナ
+  energy: number;      // ピカリんの帯電量 または カゲむしの光照射ストレス値
   targetX: number;
   targetY: number;
   animTick: number;
   cooldown: number;
 }
 
-export const MAX_SPRITES = 80;
+export const MAX_ALLIES = 80;
+export const MAX_MITES = 64;
+export const POOL_SIZE = MAX_ALLIES + MAX_MITES; // 144 固定スロット
 
 /**
- * 自律型精霊「スプライト (Sprites)」管理＆エコ・オートメーションFSM (Phase 3)
- * - モフみず (Aqua-Puff): 水辺＋発光キノコでスポーン。水を吸い、火災消火・乾燥土の灌漑・コア導水を行う
- * - コロねっこ (Root-Roller): 森林環境でスポーン。果実・蜜・黒曜石・星のかけらを拾ってコアへ運搬する
- * - ピカリん (Spark-Bit): 銅線・発電シダ・羽根車周辺でスポーン。電気を運んで機械やコアへ放電する
+ * 自律型精霊「スプライト (Sprites)」＆夜行性「カゲむし (Shade-Mite)」管理クラス
+ * 60FPS維持のため、事前確保した固定長スロットプール (144枠) で new / splice ゼロで動作する
  */
 export class SpriteManager {
+  private readonly pool: SpriteEntity[] = [];
+  /** アクティブなエンティティの読み取り専用キャッシュ配列（毎フレーム再利用・GCゼロ） */
   readonly sprites: SpriteEntity[] = [];
   private nextId = 1;
 
-  // ライティングシステムへ渡す動的光源配列（再利用してGCを削減）
+  // ライティングシステムへ渡す動的光源配列（事前確保オブジェクトを再利用）
   private readonly lightPoints: { x: number; y: number; r: number; g: number; b: number }[] = [];
+  private readonly lightPool: { x: number; y: number; r: number; g: number; b: number }[] = [];
+
+  constructor() {
+    for (let i = 0; i < POOL_SIZE; i++) {
+      this.pool.push({
+        active: false,
+        id: 0,
+        kind: 'aqua_puff',
+        x: 0,
+        y: 0,
+        vx: 0,
+        vy: 0,
+        facing: 1,
+        state: 'wander',
+        carrying: Mat.Air,
+        energy: 0,
+        targetX: 0,
+        targetY: 0,
+        animTick: 0,
+        cooldown: 0,
+      });
+    }
+    for (let i = 0; i < POOL_SIZE + 8; i++) {
+      this.lightPool.push({ x: 0, y: 0, r: 0, g: 0, b: 0 });
+    }
+  }
 
   clear(): void {
+    for (let i = 0; i < POOL_SIZE; i++) {
+      this.pool[i].active = false;
+    }
     this.sprites.length = 0;
   }
 
-  /** 手動またはテスト用にスプライトをスポーンさせる */
-  spawn(kind: SpriteKind, x: number, y: number): SpriteEntity | null {
-    if (this.sprites.length >= MAX_SPRITES) return null;
-    const sp: SpriteEntity = {
-      id: this.nextId++,
-      kind,
-      x,
-      y,
-      vx: 0,
-      vy: 0,
-      facing: Math.random() < 0.5 ? 1 : -1,
-      state: 'wander',
-      carrying: Mat.Air,
-      energy: 0,
-      targetX: x,
-      targetY: y,
-      animTick: (Math.random() * 100) | 0,
-      cooldown: 0,
-    };
-    this.sprites.push(sp);
-    return sp;
+  /** カゲむし（敵対種）のみを一括消去する（日の出リトライ時など） */
+  clearMites(): void {
+    for (let i = MAX_ALLIES; i < POOL_SIZE; i++) {
+      this.pool[i].active = false;
+    }
+    this.rebuildActiveView();
   }
 
-  /** 種類ごとの個体数を集計 */
+  /** 指定種のエンティティを事前確保プールから起動してスポーンさせる */
+  spawn(kind: SpriteKind, x: number, y: number): SpriteEntity | null {
+    const startIdx = kind === 'shade_mite' ? MAX_ALLIES : 0;
+    const endIdx = kind === 'shade_mite' ? POOL_SIZE : MAX_ALLIES;
+
+    for (let i = startIdx; i < endIdx; i++) {
+      const sp = this.pool[i];
+      if (!sp.active) {
+        sp.active = true;
+        sp.id = this.nextId++;
+        sp.kind = kind;
+        sp.x = x;
+        sp.y = y;
+        sp.vx = 0;
+        sp.vy = 0;
+        sp.facing = worldRngFlip(this.nextId + ((x + y) | 0));
+        sp.state = 'wander';
+        sp.carrying = Mat.Air;
+        sp.energy = 0;
+        sp.targetX = x;
+        sp.targetY = y;
+        sp.animTick = ((this.nextId * 17) & 63);
+        sp.cooldown = 0;
+        this.sprites.push(sp);
+        return sp;
+      }
+    }
+    return null;
+  }
+
+  /** 種類ごとの現在アクティブ個体数を集計 */
   countByKind(): Record<SpriteKind, number> {
     const counts: Record<SpriteKind, number> = {
       aqua_puff: 0,
       root_roller: 0,
       spark_bit: 0,
+      shade_mite: 0,
     };
-    for (let i = 0; i < this.sprites.length; i++) {
-      counts[this.sprites[i].kind]++;
+    for (let i = 0; i < POOL_SIZE; i++) {
+      const sp = this.pool[i];
+      if (sp.active) {
+        counts[sp.kind]++;
+      }
     }
     return counts;
   }
 
+  /** 味方スプライトの合計個体数 */
+  countAllies(): number {
+    let n = 0;
+    for (let i = 0; i < MAX_ALLIES; i++) {
+      if (this.pool[i].active) n++;
+    }
+    return n;
+  }
+
+  /** カゲむしの現在アクティブ個体数 */
+  countMites(): number {
+    let n = 0;
+    for (let i = MAX_ALLIES; i < POOL_SIZE; i++) {
+      if (this.pool[i].active) n++;
+    }
+    return n;
+  }
+
+  private rebuildActiveView(): void {
+    this.sprites.length = 0;
+    for (let i = 0; i < POOL_SIZE; i++) {
+      if (this.pool[i].active) {
+        this.sprites.push(this.pool[i]);
+      }
+    }
+  }
+
   /**
-   * 1フレーム分の自然スポーン判定と全スプライトのFSM行動更新
+   * 1フレーム分の自然スポーン判定と全アクティブエンティティのFSM行動更新
    */
   update(world: WorldGrid): void {
-    // 45フレームに1回、環境条件を満たしていれば自然スポーンを試みる
-    if (world.tick % 45 === 0 && this.sprites.length < MAX_SPRITES) {
+    // 光源マップが未更新のヘッドレス環境でもカゲむしが光判定できるよう定期同期
+    if ((world.tick & 7) === 0) {
+      world.updateLightField(this.getLightSources(world));
+    }
+
+    // 45フレームに1回、環境条件を満たしていれば味方スプライトの自然スポーンを試みる
+    if (world.tick % 45 === 0 && this.countAllies() < MAX_ALLIES) {
       this.tryNaturalSpawn(world);
     }
 
-    for (let i = this.sprites.length - 1; i >= 0; i--) {
-      const sp = this.sprites[i];
+    let anyRemoved = false;
+
+    for (let i = 0; i < POOL_SIZE; i++) {
+      const sp = this.pool[i];
+      if (!sp.active) continue;
+
       sp.animTick++;
       if (sp.cooldown > 0) sp.cooldown--;
 
-      // 溶岩などの極端な高温セルに巻き込まれた場合は退避ジャンプ（死なせずにコージーに逃がす）
+      if (sp.kind === 'shade_mite') {
+        this.updateShadeMite(world, sp);
+        if (!sp.active) anyRemoved = true;
+        continue;
+      }
+
+      // 味方スプライト：溶岩などの極端な高温セルに巻き込まれた場合は退避ジャンプ
       const gx = Math.max(0, Math.min(WIDTH - 1, Math.round(sp.x)));
       const gy = Math.max(0, Math.min(HEIGHT - 1, Math.round(sp.y)));
       if (world.temp[world.idx(gx, gy)] >= 260) {
@@ -105,11 +198,16 @@ export class SpriteManager {
       } else {
         this.updateSparkBit(world, sp);
       }
+      if (!sp.active) anyRemoved = true;
+    }
+
+    if (anyRemoved) {
+      this.rebuildActiveView();
     }
   }
 
   /**
-   * 箱庭の生態系条件に応じた自然スポーンチェック
+   * 箱庭の生態系条件に応じた味方スプライトの自然スポーンチェック
    */
   private tryNaturalSpawn(world: WorldGrid): void {
     const counts = this.countByKind();
@@ -156,6 +254,140 @@ export class SpriteManager {
   }
 
   /**
+   * 夜行性襲撃スプライト「カゲむし (Shade-Mite)」の行動・光忌避・トラップ撃退更新
+   * A* 経路探索は行わず、64x36 ライトマップ輝度勾配と局所セル参照のみで O(1) 動作する
+   */
+  private updateShadeMite(world: WorldGrid, sp: SpriteEntity): void {
+    const gx = Math.max(1, Math.min(WIDTH - 2, Math.round(sp.x)));
+    const gy = Math.max(1, Math.min(HEIGHT - 2, Math.round(sp.y)));
+    const cellIdx = world.idx(gx, gy);
+
+    // 1. 日の出による自然霧散（地下洞窟の完全暗所以外）
+    if (!world.isNight() && world.getDaylightFactor() > 0.54 && world.bgType[cellIdx] === 0) {
+      if (world.rng.chance(0.12)) {
+        sp.active = false;
+        return;
+      }
+    }
+
+    // 2. 高熱（炎・蒸気・溶岩）または帯電ブロック（電撃フェンス・雷）による即時撃退と資源ドロップ
+    let electrocuted = false;
+    let burned = false;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const nx = gx + dx;
+        const ny = gy + dy;
+        if (!world.inBounds(nx, ny)) continue;
+        const ni = world.idx(nx, ny);
+        const nm = world.type[ni];
+        if (nm === Mat.Core) continue;
+        if (world.charge[ni] >= 55 || nm === Mat.Lightning) {
+          electrocuted = true;
+          break;
+        }
+        if (world.temp[ni] >= 140 || nm === Mat.Fire || nm === Mat.Magma) {
+          burned = true;
+          break;
+        }
+      }
+      if (electrocuted || burned) break;
+    }
+
+    if (electrocuted || burned) {
+      sp.active = false;
+      // 撃退ボーナス：現在地または直上の空きセルに浄化灰・星のかけらをドロップ（自動回収ラインで資源化可能）
+      const dropOffsets: readonly [number, number][] = [
+        [0, 0],
+        [0, -1],
+        [-1, 0],
+        [1, 0],
+      ];
+      for (let k = 0; k < dropOffsets.length; k++) {
+        const dx = gx + dropOffsets[k][0];
+        const dy = gy + dropOffsets[k][1];
+        if (!world.inBounds(dx, dy)) continue;
+        if (world.type[world.idx(dx, dy)] === Mat.Air) {
+          if (electrocuted && (world.dayCount >= 8 || world.rng.chance(0.28))) {
+            world.setCell(dx, dy, Mat.StarShard, 0, 35);
+          } else if (electrocuted || world.rng.chance(0.75)) {
+            world.setCell(dx, dy, Mat.Ash, 0, 35);
+          }
+          break;
+        }
+      }
+      return;
+    }
+
+    // 3. テラリウム・コア到達時の耐久値 (Vitality) 吸収攻撃
+    if (world.hasCore) {
+      if (Math.abs(gx - world.coreX) <= 3 && Math.abs(gy - world.coreY) <= 3) {
+        world.damageCore(4);
+        sp.active = false;
+        return;
+      }
+    }
+
+    // 4. 64x36 ライトマップ勾配を用いた光忌避ベクトル計算
+    const goalX = world.hasCore ? world.coreX : WIDTH >> 1;
+    const goalDir: 1 | -1 = goalX >= sp.x ? 1 : -1;
+
+    const lumaHere = world.getLightAt(gx, gy);
+    const lumaAhead = world.getLightAt(gx + goalDir * 5, gy);
+    const lumaBehind = world.getLightAt(gx - goalDir * 5, gy);
+    const maxLuma = lumaHere > lumaAhead ? lumaHere : lumaAhead;
+
+    // 強い光源（焚き火・発光キノコ・ピカリん等）に照らされると怯んで後退する
+    if (maxLuma >= 62) {
+      sp.energy += maxLuma >= 110 ? 5 : 3;
+      // 光が弱い背後方向へ逃げ返す
+      const fleeDir: 1 | -1 = lumaAhead >= lumaBehind ? (-goalDir as 1 | -1) : goalDir;
+      sp.facing = fleeDir;
+      sp.state = 'wander';
+      if (sp.cooldown === 0 && this.isWalkBlocked(world, gx, gy + 1)) {
+        sp.vy = -0.85;
+        sp.cooldown = 18;
+      }
+      // 強い光に照射され続けた場合は浄化消散
+      if (sp.energy >= 90) {
+        sp.active = false;
+        if (world.type[cellIdx] === Mat.Air && world.rng.chance(0.45)) {
+          world.setCell(gx, gy, Mat.Ash, 0, 26);
+        }
+        return;
+      }
+    } else {
+      sp.energy = Math.max(0, sp.energy - 1);
+      sp.state = 'seek';
+      sp.targetX = goalX;
+      sp.targetY = world.hasCore ? world.coreY : gy;
+      sp.facing = goalDir;
+    }
+
+    // 5. 道中の植物食害および Phase II (Day 4+) 以降の木壁かじり
+    if (sp.cooldown === 0) {
+      const frontX = gx + sp.facing;
+      for (let dy = -1; dy <= 1; dy++) {
+        const fy = gy + dy;
+        if (!world.inBounds(frontX, fy)) continue;
+        const fm = world.getMat(frontX, fy);
+        if (fm === Mat.PlantStem || fm === Mat.Leaf || fm === Mat.Flower || fm === Mat.Seed) {
+          world.setCell(frontX, fy, Mat.Air);
+          sp.cooldown = 22;
+          break;
+        }
+        // Day 4 以降は木の壁も少しずつかじって突破を試みる（石材・ガラス・自動ゲートは突破不可）
+        if (fm === Mat.Wood && world.dayCount >= 4 && world.rng.chance(0.18)) {
+          world.setCell(frontX, fy, Mat.Air);
+          sp.cooldown = 35;
+          break;
+        }
+      }
+    }
+
+    this.moveGroundWalker(world, sp, sp.state === 'wander' ? 0.62 : 0.48);
+  }
+
+  /**
    * モフみず (Aqua-Puff): 水を吸って火災消火・乾燥土の灌漑・コアへの水納品を行う
    */
   private updateAquaPuff(world: WorldGrid, sp: SpriteEntity): void {
@@ -163,7 +395,6 @@ export class SpriteManager {
     const gy = Math.round(sp.y);
 
     if (sp.carrying === Mat.Air) {
-      // 足元または隣に水があれば吸い込む
       const waterPos = this.findNearbyMat(world, gx, gy, 2, (m) => m === Mat.Water);
       if (waterPos && sp.cooldown === 0) {
         world.setCell(waterPos.x, waterPos.y, Mat.Air);
@@ -181,7 +412,6 @@ export class SpriteManager {
         }
       }
     } else {
-      // 水を保持中：優先順位 1.火災(Fire)消火 → 2.乾いた土(Soil)灌漑 → 3.コア(Core)納品
       const firePos = this.findNearbyMat(world, gx, gy, 30, (m) => m === Mat.Fire);
       if (firePos) {
         sp.targetX = firePos.x;
@@ -208,6 +438,7 @@ export class SpriteManager {
           sp.targetY = world.coreY;
           if (Math.abs(gx - world.coreX) <= 3 && Math.abs(gy - world.coreY) <= 3) {
             world.onCoreDeliver?.('water', 2);
+            world.healCore(1);
             sp.carrying = Mat.Air;
             sp.state = 'wander';
             sp.cooldown = 25;
@@ -247,7 +478,6 @@ export class SpriteManager {
         }
       }
     } else {
-      // 運搬先：コアがあればコアへ、なければ近くの発光キノコや植物の根元へ集積
       if (world.hasCore) {
         sp.targetX = world.coreX;
         sp.targetY = world.coreY;
@@ -261,12 +491,12 @@ export class SpriteManager {
                   ? 'obsidian'
                   : 'star_shard';
           world.onCoreDeliver?.(kind, 1);
+          world.healCore(1);
           sp.carrying = Mat.Air;
           sp.state = 'wander';
           sp.cooldown = 20;
         }
       } else {
-        // Cozy Mode でも120フレーム運んだら蜜は栄養土に変えるなど愛らしい行動をとる
         if (sp.animTick % 180 === 0 && world.getMat(gx, gy) === Mat.Air) {
           world.setCell(gx, gy, sp.carrying);
           sp.carrying = Mat.Air;
@@ -287,7 +517,6 @@ export class SpriteManager {
     const gy = Math.round(sp.y);
 
     if (sp.energy <= 10) {
-      // 帯電している発電箇所を探す
       const src = this.findNearbyChargedSource(world, gx, gy, 34);
       if (src) {
         sp.state = 'seek';
@@ -301,7 +530,6 @@ export class SpriteManager {
         sp.state = 'wander';
       }
     } else {
-      // 放電先（未通電のポンプ・ゲート・蓄電池 または テラリウム・コア）を探す
       const sink = this.findPowerSink(world, gx, gy, 36);
       if (sink) {
         sp.state = 'deliver';
@@ -312,6 +540,7 @@ export class SpriteManager {
           const sMat = world.type[si];
           if (sMat === Mat.Core) {
             world.onCoreDeliver?.('power', 8);
+            world.healCore(1);
           } else if (sMat === Mat.Battery) {
             world.meta[si] = Math.min(250, world.meta[si] + 45);
             world.charge[si] = 200;
@@ -327,11 +556,10 @@ export class SpriteManager {
       }
     }
 
-    // 浮遊移動ロジック
     if (sp.state === 'wander') {
       if (sp.animTick % 40 === 0) {
-        sp.targetX = Math.max(8, Math.min(WIDTH - 8, sp.x + (Math.random() - 0.5) * 32));
-        sp.targetY = Math.max(12, Math.min(HEIGHT - 16, sp.y + (Math.random() - 0.5) * 20));
+        sp.targetX = Math.max(8, Math.min(WIDTH - 8, sp.x + (world.rng.next() - 0.5) * 32));
+        sp.targetY = Math.max(12, Math.min(HEIGHT - 16, sp.y + (world.rng.next() - 0.5) * 20));
       }
     }
 
@@ -344,7 +572,10 @@ export class SpriteManager {
 
     const nx = sp.x + sp.vx;
     const ny = sp.y + sp.vy;
-    if (world.inBounds(Math.round(nx), Math.round(ny)) && !isSolidBlocking(world.getMat(Math.round(nx), Math.round(ny)))) {
+    if (
+      world.inBounds(Math.round(nx), Math.round(ny)) &&
+      !isSolidBlocking(world.getMat(Math.round(nx), Math.round(ny)))
+    ) {
       sp.x = nx;
       sp.y = ny;
     } else {
@@ -354,14 +585,14 @@ export class SpriteManager {
   }
 
   /**
-   * 地上歩行スプライト（モフみず・コロねっこ）の物理移動＆1〜2段オートジャンプ
+   * 地上歩行エンティティ（モフみず・コロねっこ・カゲむし）の物理移動＆1〜2段オートジャンプ
    */
   private moveGroundWalker(world: WorldGrid, sp: SpriteEntity, speed: number): void {
     if (sp.state === 'wander') {
-      if (sp.animTick % 55 === 0) {
-        sp.facing = Math.random() < 0.5 ? 1 : -1;
+      if (sp.kind !== 'shade_mite' && sp.animTick % 55 === 0) {
+        sp.facing = world.rng.chance(0.5) ? 1 : -1;
       }
-      sp.vx = sp.facing * speed * 0.65;
+      sp.vx = sp.facing * speed * (sp.kind === 'shade_mite' ? 1.0 : 0.65);
     } else {
       const dx = sp.targetX - sp.x;
       if (Math.abs(dx) > 1) {
@@ -372,15 +603,13 @@ export class SpriteManager {
       }
     }
 
-    // 重力適用（水中では浮力でゆっくり泳ぐ）
     const curMat = world.getMat(Math.round(sp.x), Math.round(sp.y));
-    if (curMat === Mat.Water) {
+    if (curMat === Mat.Water || curMat === Mat.BlightWater) {
       sp.vy = Math.max(-0.6, sp.vy - 0.08);
     } else {
       sp.vy = Math.min(1.8, sp.vy + 0.16);
     }
 
-    // 横移動と段差乗り越え（最大2セル高までの段差を自動でぴょんと登る）
     const nextX = Math.max(2, Math.min(WIDTH - 3, sp.x + sp.vx));
     const checkX = Math.round(nextX);
     const checkY = Math.round(sp.y);
@@ -396,15 +625,13 @@ export class SpriteManager {
       sp.y -= 2;
       sp.vy = -0.4;
     } else {
-      // 高い壁にぶつかったら反転または小ジャンプ
-      if (sp.state === 'wander') {
-        sp.facing = (sp.facing === 1 ? -1 : 1);
+      if (sp.state === 'wander' && sp.kind !== 'shade_mite') {
+        sp.facing = sp.facing === 1 ? -1 : 1;
       } else if (this.isWalkBlocked(world, Math.round(sp.x), checkY + 1)) {
         sp.vy = -1.35;
       }
     }
 
-    // 縦移動と着地判定
     const nextY = Math.max(2, Math.min(HEIGHT - 4, sp.y + sp.vy));
     if (!this.isWalkBlocked(world, Math.round(sp.x), Math.round(nextY))) {
       sp.y = nextY;
@@ -418,10 +645,17 @@ export class SpriteManager {
 
   private isWalkBlocked(world: WorldGrid, x: number, y: number): boolean {
     const m = world.getMat(x, y);
-    if (m === Mat.Air || m === Mat.Water || m === Mat.Steam || m === Mat.Spore || m === Mat.GateOpen) {
+    if (
+      m === Mat.Air ||
+      m === Mat.Water ||
+      m === Mat.BlightWater ||
+      m === Mat.Steam ||
+      m === Mat.Spore ||
+      m === Mat.Miasma ||
+      m === Mat.GateOpen
+    ) {
       return false;
     }
-    // 葉や茎・キノコ・花はスプライトがすり抜けて歩けるようにする
     if (
       m === Mat.PlantStem ||
       m === Mat.Leaf ||
@@ -503,7 +737,6 @@ export class SpriteManager {
     cy: number,
     radius: number
   ): { x: number; y: number } | null {
-    // コアがあれば優先候補に入れつつ、近くの未通電ポンプ・蓄電池・ゲートも探す
     const minY = Math.max(1, cy - radius);
     const maxY = Math.min(HEIGHT - 2, cy + radius);
     const minX = Math.max(1, cx - radius);
@@ -530,38 +763,47 @@ export class SpriteManager {
   }
 
   /**
-   * ライティング用の発光座標リストを生成して返す
+   * ライティング用の発光座標リストを事前確保プールから書き出して返す（GCゼロ）
    */
-  getLightSources(world: WorldGrid): ReadonlyArray<{ x: number; y: number; r: number; g: number; b: number }> {
+  getLightSources(
+    world: WorldGrid
+  ): ReadonlyArray<{ x: number; y: number; r: number; g: number; b: number }> {
     this.lightPoints.length = 0;
-    for (let i = 0; i < this.sprites.length; i++) {
-      const sp = this.sprites[i];
+    let poolIdx = 0;
+
+    const pushLight = (x: number, y: number, r: number, g: number, b: number) => {
+      if (poolIdx >= this.lightPool.length) return;
+      const item = this.lightPool[poolIdx++];
+      item.x = x;
+      item.y = y;
+      item.r = r;
+      item.g = g;
+      item.b = b;
+      this.lightPoints.push(item);
+    };
+
+    for (let i = 0; i < MAX_ALLIES; i++) {
+      const sp = this.pool[i];
+      if (!sp.active) continue;
       if (sp.kind === 'spark_bit') {
-        const intensity = sp.energy > 10 ? 1.0 : 0.55;
-        this.lightPoints.push({
-          x: sp.x | 0,
-          y: sp.y | 0,
-          r: (255 * intensity) | 0,
-          g: (235 * intensity) | 0,
-          b: (120 * intensity) | 0,
-        });
+        const intensity = sp.energy > 10 ? 1.0 : 0.6;
+        pushLight(
+          sp.x | 0,
+          sp.y | 0,
+          (255 * intensity) | 0,
+          (235 * intensity) | 0,
+          (120 * intensity) | 0
+        );
       } else if (sp.kind === 'aqua_puff') {
-        this.lightPoints.push({
-          x: sp.x | 0,
-          y: sp.y | 0,
-          r: 35,
-          g: 120,
-          b: 185,
-        });
+        pushLight(sp.x | 0, sp.y | 0, 35, 120, 185);
       }
     }
 
-    // 夜間には森の上を舞う幻想的なホタルの光を追加
     if (world.isNight()) {
       for (let f = 0; f < 6; f++) {
         const fx = ((Math.sin(world.tick * 0.013 + f * 2.1) * 0.42 + 0.5) * WIDTH) | 0;
         const fy = (52 + Math.cos(world.tick * 0.019 + f * 1.7) * 22) | 0;
-        this.lightPoints.push({ x: fx, y: fy, r: 130, g: 220, b: 95 });
+        pushLight(fx, fy, 95, 165, 70);
       }
     }
 
@@ -569,17 +811,18 @@ export class SpriteManager {
   }
 
   /**
-   * オフスクリーン Canvas (256x144) にベビーシェマに基づく丸いドット絵キャラクターを描画する
+   * オフスクリーン Canvas (256x144) に味方スプライト3種と夜行性カゲむしを描画する
    */
   render(ctx: CanvasRenderingContext2D, world: WorldGrid): void {
-    for (let i = 0; i < this.sprites.length; i++) {
-      const sp = this.sprites[i];
+    for (let i = 0; i < POOL_SIZE; i++) {
+      const sp = this.pool[i];
+      if (!sp.active) continue;
+
       const bounce = (sp.animTick >> 3) & 1;
       const sx = Math.round(sp.x);
       const sy = Math.round(sp.y) - bounce;
 
       if (sp.kind === 'aqua_puff') {
-        // モフみず：水色のぷにぷにしずく型ボディ (3x3) + 白いハイライト + つぶらな目
         ctx.fillStyle = '#5ad2ff';
         ctx.fillRect(sx - 1, sy - 2, 3, 3);
         ctx.fillStyle = '#bdf2ff';
@@ -591,7 +834,6 @@ export class SpriteManager {
           ctx.fillRect(sx, sy - 4, 2, 2);
         }
       } else if (sp.kind === 'root_roller') {
-        // コロねっこ：温かい木の実ブラウンの丸ボディ + 頭の双葉 + 運搬アイテム表示
         ctx.fillStyle = '#c88c52';
         ctx.fillRect(sx - 1, sy - 2, 3, 3);
         ctx.fillStyle = '#78dc5a';
@@ -609,8 +851,7 @@ export class SpriteManager {
                   : '#fff4a8';
           ctx.fillRect(sx - 1, sy - 4, 2, 2);
         }
-      } else {
-        // ピカリん：輝く黄金スターボディ + パタパタ羽根
+      } else if (sp.kind === 'spark_bit') {
         ctx.fillStyle = sp.energy > 10 ? '#fff275' : '#e6be5a';
         ctx.fillRect(sx - 1, sy - 1, 3, 2);
         ctx.fillStyle = '#ffffff';
@@ -620,10 +861,23 @@ export class SpriteManager {
           ctx.fillRect(sx - 2, sy - 2, 1, 1);
           ctx.fillRect(sx + 2, sy - 2, 1, 1);
         }
+      } else {
+        // カゲむし (Shade-Mite): 丸みのある暗紫の影ボディ + 小さな角突起 + 淡く光る単眼
+        ctx.fillStyle = '#241830';
+        ctx.fillRect(sx - 1, sy - 2, 3, 2);
+        ctx.fillStyle = '#3d2852';
+        ctx.fillRect(sx, sy - 3, 1, 1);
+        // 脚のちょこちょこ動き
+        const legShift = (sp.animTick >> 2) & 1;
+        ctx.fillStyle = '#181022';
+        ctx.fillRect(sx - 1 + legShift, sy, 1, 1);
+        ctx.fillRect(sx + 1 - legShift, sy, 1, 1);
+        // 光に怯えている時は単眼が黄色、侵攻時は不気味な珊瑚赤に光る
+        ctx.fillStyle = sp.energy > 20 ? '#d6a45f' : '#e8685a';
+        ctx.fillRect(sx + (sp.facing > 0 ? 1 : -1), sy - 2, 1, 1);
       }
     }
 
-    // 夜間のホタルドット描画
     if (world.isNight()) {
       ctx.fillStyle = '#d8ff8a';
       for (let f = 0; f < 6; f++) {
@@ -636,3 +890,6 @@ export class SpriteManager {
   }
 }
 
+function worldRngFlip(seedLike: number): 1 | -1 {
+  return (seedLike & 1) === 0 ? 1 : -1;
+}

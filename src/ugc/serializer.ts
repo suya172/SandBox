@@ -1,35 +1,63 @@
-import { MAT_DEFAULT_TEMP } from '../core/materials';
+import { MAT_COUNT, MAT_DEFAULT_TEMP } from '../core/materials';
 import { GameMode } from '../core/terrainGen';
 import { SIZE, WorldGrid } from '../core/world';
-import { ProgressionManager } from '../modes/alchemist';
+import { ProgressionManager, ToolTier } from '../modes/alchemist';
 
-const MAGIC_V1 = 0x54; // 'T'
-const VERSION = 1;
+const MAGIC_T = 0x54; // 'T'
+const VERSION_V1 = 1;
+const VERSION_V2 = 2;
 
 /**
- * サーバーレスUGC共有用 RLE (ランレングス圧縮) + URL-safe Base64 シリアライザ (Phase 4)
- * ワールド状態・モード・進行状況を単一のコンパクトなテキストコードへ可逆変換する
+ * サーバーレスUGC共有用 RLE (ランレングス圧縮) + URL-safe Base64 シリアライザ
+ * V2: ワールド全プレーンに加え、ツールティア・コア耐久値・採取ストック・無限化マスクを可逆保存する
+ * V1: 既存の共有コードもエラーなく復元できる後方互換デコーダを保持
  */
 export function serializeWorld(world: WorldGrid, progression: ProgressionManager): string {
   const bytes: number[] = [];
 
-  // ヘッダ (14 bytes)
-  bytes.push(MAGIC_V1, VERSION);
+  // V2 ヘッダ (16 bytes)
+  bytes.push(MAGIC_T, VERSION_V2);
   pushUint32(bytes, world.seed);
   bytes.push(progression.mode === 'alchemist' ? 1 : 0);
-  bytes.push(progression.stage & 0xff);
+  bytes.push(progression.toolTier & 0xff);
+  bytes.push(progression.raidsEnabled ? 1 : 0);
+  bytes.push(Math.max(0, Math.min(255, world.coreVitality | 0)));
   pushUint16(bytes, Math.round(world.timeOfDay * 10000));
   pushUint16(bytes, world.dayCount & 0xffff);
   bytes.push(world.hasCore ? 1 : 0);
   bytes.push(world.coreX & 0xff);
   bytes.push(world.coreY & 0xff);
 
-  // Alchemist 進捗カウンタ (5 * 2 = 10 bytes)
-  pushUint16(bytes, progression.progress.water);
-  pushUint16(bytes, progression.progress.nectar_or_fruit);
-  pushUint16(bytes, progression.progress.power);
-  pushUint16(bytes, progression.progress.obsidian);
-  pushUint16(bytes, progression.progress.star_shard);
+  // Alchemist 進行統計 (7 * 2 = 14 bytes)
+  pushUint16(bytes, Math.min(65535, progression.stats.waterDelivered));
+  pushUint16(bytes, Math.min(65535, progression.stats.bioDelivered));
+  pushUint16(bytes, Math.min(65535, progression.stats.powerDelivered));
+  pushUint16(bytes, Math.min(65535, progression.stats.glassCollected));
+  pushUint16(bytes, Math.min(65535, progression.stats.copperCollected));
+  pushUint16(bytes, Math.min(65535, progression.stats.obsidianCollected));
+  pushUint16(bytes, Math.min(65535, progression.stats.starShardCollected));
+
+  // 無限化マスク (MAT_COUNT bytes)
+  bytes.push(MAT_COUNT);
+  for (let m = 0; m < MAT_COUNT; m++) {
+    bytes.push(progression.infiniteMask[m] ? 1 : 0);
+  }
+
+  // 非ゼロ所持ストックのスパース格納 ([count, (matId, amountU16)...])
+  const nonZeroStocks: [number, number][] = [];
+  if (progression.mode === 'alchemist') {
+    for (let m = 0; m < MAT_COUNT; m++) {
+      const amt = progression.stock[m];
+      if (amt > 0) {
+        nonZeroStocks.push([m, Math.min(65535, amt)]);
+      }
+    }
+  }
+  bytes.push(nonZeroStocks.length & 0xff);
+  for (const [m, amt] of nonZeroStocks) {
+    bytes.push(m & 0xff);
+    pushUint16(bytes, amt);
+  }
 
   // 各プレーンを RLE 圧縮して格納
   encodeRLEPlane(bytes, world.type);
@@ -51,7 +79,7 @@ export function serializeWorld(world: WorldGrid, progression: ProgressionManager
 }
 
 /**
- * URL-safe Base64 文字列からワールド状態と進行状況を復元する
+ * URL-safe Base64 文字列からワールド状態と進行状況を復元する（V1 / V2 両対応）
  */
 export function deserializeWorld(
   code: string,
@@ -62,7 +90,12 @@ export function deserializeWorld(
     const clean = code.trim().replace(/^#?world=/, '');
     if (!clean) return false;
     const data = urlBase64ToBytes(clean);
-    if (data.length < 25 || data[0] !== MAGIC_V1 || data[1] !== VERSION) {
+    if (data.length < 25 || data[0] !== MAGIC_T) {
+      return false;
+    }
+
+    const version = data[1];
+    if (version !== VERSION_V1 && version !== VERSION_V2) {
       return false;
     }
 
@@ -85,7 +118,15 @@ export function deserializeWorld(
 
     const seed = readU32();
     const mode: GameMode = data[offset++] === 1 ? 'alchemist' : 'cozy';
-    const stage = data[offset++];
+    const tierOrStage = data[offset++];
+
+    let raidsEnabled = true;
+    let coreVitality = 100;
+    if (version === VERSION_V2) {
+      raidsEnabled = data[offset++] === 1;
+      coreVitality = data[offset++];
+    }
+
     const timeScaled = readU16();
     const dayCount = readU16();
     const hasCore = data[offset++] === 1;
@@ -99,14 +140,53 @@ export function deserializeWorld(
     world.hasCore = hasCore;
     world.coreX = coreX;
     world.coreY = coreY;
+    world.coreVitality = Math.max(1, Math.min(world.maxCoreVitality, coreVitality));
 
     progression.reset(mode);
-    progression.stage = Math.max(1, stage);
-    progression.progress.water = readU16();
-    progression.progress.nectar_or_fruit = readU16();
-    progression.progress.power = readU16();
-    progression.progress.obsidian = readU16();
-    progression.progress.star_shard = readU16();
+
+    if (version === VERSION_V1) {
+      // V1 後方互換：旧 stage (1..6) を ToolTier (1..4) へマッピング
+      const mappedTier = Math.max(1, Math.min(4, tierOrStage >= 5 ? 4 : tierOrStage)) as ToolTier;
+      progression.toolTier = mode === 'cozy' ? 4 : mappedTier;
+      progression.stats.waterDelivered = readU16();
+      progression.stats.bioDelivered = readU16();
+      progression.stats.powerDelivered = readU16();
+      progression.stats.obsidianCollected = readU16();
+      progression.stats.starShardCollected = readU16();
+    } else {
+      progression.toolTier = (
+        mode === 'cozy' ? 4 : Math.max(1, Math.min(4, tierOrStage))
+      ) as ToolTier;
+      progression.raidsEnabled = raidsEnabled;
+      progression.stats.waterDelivered = readU16();
+      progression.stats.bioDelivered = readU16();
+      progression.stats.powerDelivered = readU16();
+      progression.stats.glassCollected = readU16();
+      progression.stats.copperCollected = readU16();
+      progression.stats.obsidianCollected = readU16();
+      progression.stats.starShardCollected = readU16();
+
+      const maskLen = data[offset++];
+      progression.infiniteMask.fill(0);
+      for (let m = 0; m < maskLen; m++) {
+        const flag = data[offset++];
+        if (m < progression.infiniteMask.length) {
+          progression.infiniteMask[m] = flag ? 1 : 0;
+        }
+      }
+
+      const stockCount = data[offset++];
+      if (mode === 'alchemist') {
+        progression.stock.fill(0);
+      }
+      for (let k = 0; k < stockCount; k++) {
+        const m = data[offset++];
+        const amt = readU16();
+        if (m < progression.stock.length) {
+          progression.stock[m] = amt;
+        }
+      }
+    }
 
     offset = decodeRLEPlane(data, offset, world.type);
     offset = decodeRLEPlane(data, offset, world.meta);
@@ -118,11 +198,15 @@ export function deserializeWorld(
     const quantTemp = new Uint8Array(SIZE);
     decodeRLEPlane(data, offset, quantTemp);
     for (let i = 0; i < SIZE; i++) {
+      const m = world.type[i];
       const t = quantTemp[i] * 4 - 60;
-      const defT = MAT_DEFAULT_TEMP[world.type[i]];
+      const defT = m < MAT_COUNT ? MAT_DEFAULT_TEMP[m] : 22;
       world.temp[i] = Math.abs(t - defT) <= 2 ? defT : t;
     }
 
+    world.saveDawnSnapshot();
+    progression.saveDawnState();
+    world.updateLightField();
     world.wakeAll();
     return true;
   } catch {
@@ -130,13 +214,6 @@ export function deserializeWorld(
   }
 }
 
-/**
- * 1プレーン (36,864 bytes) のランレングス圧縮
- * 同一値が2回以上連続する場合: [0xFF (エスケープ または 上位フラグ)] ではなく
- * ペア形式だと単発値で膨らむため、以下のコンパクト符号を採用:
- * - run === 1 かつ val < 192: [val] (1 byte!)
- * - それ以外: [0xC0 | ((run >> 8) & 0x3F), run & 0xFF, val] (最大 run = 16383, 3 bytes)
- */
 function encodeRLEPlane(out: number[], plane: Uint8Array): void {
   let i = 0;
   const len = plane.length;
@@ -206,4 +283,3 @@ export function urlBase64ToBytes(str: string): Uint8Array {
   }
   return out;
 }
-

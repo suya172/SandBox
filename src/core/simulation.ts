@@ -31,15 +31,20 @@ const DY4 = [-1, 0, 1, 0];
 export function stepSimulation(world: WorldGrid): void {
   world.tick++;
   // 昼夜サイクルの進行（約3600フレーム = 60秒で1日経過）
+  const prevTime = world.timeOfDay;
   world.timeOfDay += 1 / 3600;
   if (world.timeOfDay >= 1.0) {
     world.timeOfDay -= 1.0;
     world.dayCount++;
   }
+  if (prevTime < 0.25 && world.timeOfDay >= 0.25) {
+    world.onDawn?.(world.dayCount);
+  }
 
-  // 植物やゆっくりした反応が完全停止しないよう、定期的に全チャンクを軽く走査対象にする
+  // 16フレームに1回、低解像度ライトマップを更新（ヘッドレス時やカゲむし・瘴気霧の光判定用）
   if ((world.tick & 15) === 0) {
     world.chunkNextActive.fill(1);
+    world.updateLightField();
   }
 
   world.beginStep();
@@ -115,12 +120,33 @@ function updateCell(world: WorldGrid, x: number, y: number, i: number, mat: MatI
       world.setCell(x, y, Mat.Fire, 75, 520);
     }
   } else if (mat === Mat.Spring) {
-    // 天然水源：素数周期で下または横に空きがあれば水を湧出
-    if ((world.tick + x * 7) % 31 === 0) {
+    // meta === 1 は地下硬岩に封じられた休眠湧水石：周囲が開通するかパイプ/ポンプ/通電が来ると稼働開始 (meta = 0)
+    if (world.meta[i] === 1) {
+      let awakened = world.charge[i] >= 40;
+      for (let d = 0; d < 4 && !awakened; d++) {
+        const nx = x + DX4[d];
+        const ny = y + DY4[d];
+        if (!world.inBounds(nx, ny)) continue;
+        const ni = world.idx(nx, ny);
+        const nm = world.type[ni];
+        if (nm === Mat.Air || nm === Mat.Pipe || nm === Mat.Pump || world.charge[ni] >= 40) {
+          awakened = true;
+        }
+      }
+      if (awakened) {
+        world.meta[i] = 0;
+      } else {
+        return;
+      }
+    }
+
+    // 稼働中の天然水源：周期的に下・左右・上（被圧湧出）の空きセルへ清水を湧出
+    if ((world.tick + x * 7) % 21 === 0) {
       const targets: [number, number][] = [
         [x, y + 1],
         [x - 1, y],
         [x + 1, y],
+        [x, y - 1],
       ];
       for (const [nx, ny] of targets) {
         if (world.inBounds(nx, ny) && world.type[world.idx(nx, ny)] === Mat.Air) {
@@ -177,12 +203,42 @@ function updatePowder(world: WorldGrid, x: number, y: number, i: number, mat: Ma
         }
       }
     }
+  } else if (mat === Mat.BlightSoil) {
+    // 腐敗土：近傍2マス以内に発光キノコまたは灰があれば菌糸・ミネラル浄化で湿潤土へ再生
+    let purified = false;
+    for (let dy = -2; dy <= 2 && !purified; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        if (!world.inBounds(x + dx, y + dy)) continue;
+        const nm = world.type[world.idx(x + dx, y + dy)];
+        if (nm === Mat.Mushroom || nm === Mat.Ash) {
+          purified = true;
+          break;
+        }
+      }
+    }
+    if (purified) {
+      if (world.rng.chance(0.08)) {
+        world.setCell(x, y, Mat.WetSoil, 170, temp);
+        return;
+      }
+      // 浄化源が隣接している間はチャンクスリープを防いで継続反応させる
+      world.wakeAround(x, y);
+    }
   } else if (mat === Mat.Ash) {
-    // 灰（肥料）が土に触れると栄養豊富な湿潤土へ同化
-    if (y + 1 < HEIGHT) {
-      const bi = world.idx(x, y + 1);
-      if (world.type[bi] === Mat.Soil || world.type[bi] === Mat.WetSoil) {
-        world.setCell(x, y + 1, Mat.WetSoil, 220, world.temp[bi]);
+    // 灰（肥料・浄化材）が土や腐敗土に触れると栄養豊富な湿潤土へ同化
+    for (let d = 0; d < 4; d++) {
+      const nx = x + DX4[d];
+      const ny = y + DY4[d];
+      if (!world.inBounds(nx, ny)) continue;
+      const ni = world.idx(nx, ny);
+      const bMat = world.type[ni];
+      if (bMat === Mat.Soil || bMat === Mat.WetSoil || bMat === Mat.BlightSoil) {
+        world.setCell(nx, ny, Mat.WetSoil, 220, world.temp[ni]);
+        world.setCell(x, y, Mat.Air);
+        return;
+      }
+      if (bMat === Mat.BlightWater) {
+        world.setCell(nx, ny, Mat.Water, 0, world.temp[ni]);
         world.setCell(x, y, Mat.Air);
         return;
       }
@@ -226,8 +282,8 @@ function updatePowder(world: WorldGrid, x: number, y: number, i: number, mat: Ma
     return;
   }
 
-  // 湿潤土や土は一定の安息角を保ち、崩れすぎないようにする
-  if ((mat === Mat.WetSoil || mat === Mat.Soil) && world.rng.chance(0.45)) {
+  // 湿潤土・土・腐敗土は一定の安息角を保ち、崩れすぎないようにする
+  if ((mat === Mat.WetSoil || mat === Mat.Soil || mat === Mat.BlightSoil) && world.rng.chance(0.45)) {
     return;
   }
 
@@ -259,15 +315,60 @@ function updatePowder(world: WorldGrid, x: number, y: number, i: number, mat: Ma
 function updateLiquid(world: WorldGrid, x: number, y: number, i: number, mat: MatId): void {
   const temp = world.temp[i];
 
-  // 1. テラリウム・コアへの液体納品チェック（水・蜜）
+  // 1. テラリウム・コアへの液体納品チェック（水・蜜は納品＆微回復、汚染水はコア汚染ダメージ）
   if ((mat === Mat.Water || mat === Mat.Nectar) && touchesCore(world, x, y)) {
     world.onCoreDeliver?.(mat === Mat.Water ? 'water' : 'nectar', 1);
+    if (world.rng.chance(0.25)) world.healCore(1);
+    world.setCell(x, y, Mat.Air);
+    return;
+  }
+  if (mat === Mat.BlightWater && touchesCore(world, x, y)) {
+    world.damageCore(2);
     world.setCell(x, y, Mat.Air);
     return;
   }
 
   // 2. 液体ごとの化学反応・相転移
-  if (mat === Mat.Water) {
+  if (mat === Mat.BlightWater) {
+    // 沸騰蒸留すると清浄な蒸気へ変わる
+    if (temp >= 100) {
+      world.setCell(x, y, Mat.Steam, 130, Math.max(110, temp));
+      return;
+    }
+    for (let d = 0; d < 4; d++) {
+      const nx = x + DX4[d];
+      const ny = y + DY4[d];
+      if (!world.inBounds(nx, ny)) continue;
+      const ni = world.idx(nx, ny);
+      const nMat = world.type[ni];
+
+      // 発光キノコまたは灰によるバイオ浄化、および砂層による濾過浄化
+      if (nMat === Mat.Mushroom || nMat === Mat.Ash) {
+        world.setCell(x, y, Mat.Water, 0, temp);
+        if (nMat === Mat.Ash && world.rng.chance(0.4)) {
+          world.setCell(nx, ny, Mat.Air);
+        }
+        return;
+      }
+      if (nMat === Mat.Sand && world.rng.chance(0.18)) {
+        world.setCell(x, y, Mat.Water, 0, temp);
+        return;
+      }
+      // 通常の土壌を腐敗土に変え、通常植物を枯死させる
+      if ((nMat === Mat.Soil || nMat === Mat.WetSoil) && world.rng.chance(0.1)) {
+        world.setCell(nx, ny, Mat.BlightSoil, 0, world.temp[ni]);
+      } else if (
+        (nMat === Mat.PlantStem || nMat === Mat.Leaf || nMat === Mat.Flower || nMat === Mat.Seed) &&
+        world.rng.chance(0.16)
+      ) {
+        world.setCell(nx, ny, Mat.Air);
+      } else if (nMat === Mat.Magma) {
+        world.setCell(nx, ny, Mat.Obsidian, 0, 140);
+        world.setCell(x, y, Mat.Steam, 140, 130);
+        return;
+      }
+    }
+  } else if (mat === Mat.Water) {
     // 沸点以上で蒸気に気化
     if (temp >= 100) {
       world.setCell(x, y, Mat.Steam, 140, Math.max(110, temp));
@@ -477,6 +578,45 @@ function updateGas(world: WorldGrid, x: number, y: number, i: number, mat: MatId
       world.meta[i]--;
     } else {
       world.setCell(x, y, Mat.Air);
+      return;
+    }
+  } else if (mat === Mat.Miasma) {
+    // 瘴気霧：日中の太陽光、高温 (>=45℃)、または強い光源 (lightLuma >= 50) で霧散する
+    if (
+      world.temp[i] >= 45 ||
+      (!world.isNight() && world.rng.chance(0.15)) ||
+      (world.getLightAt(x, y) >= 50 && world.rng.chance(0.3))
+    ) {
+      world.setCell(x, y, Mat.Air);
+      return;
+    }
+    if (world.meta[i] > 0) {
+      world.meta[i]--;
+    } else {
+      world.setCell(x, y, Mat.Air);
+      return;
+    }
+    // 暗所の露出した若葉を低確率でしおれさせる
+    if ((world.tick & 7) === 0) {
+      for (let d = 0; d < 4; d++) {
+        const nx = x + DX4[d];
+        const ny = y + DY4[d];
+        if (!world.inBounds(nx, ny)) continue;
+        const nm = world.type[world.idx(nx, ny)];
+        if ((nm === Mat.Leaf || nm === Mat.Flower) && world.rng.chance(0.03)) {
+          world.setCell(nx, ny, Mat.Air);
+        }
+      }
+    }
+    // 地表近くを横に漂う動きを優先
+    if (world.rng.chance(0.65)) {
+      const rdx = world.rng.chance(0.5) ? -1 : 1;
+      const nx = x + rdx;
+      if (world.inBounds(nx, y) && world.type[world.idx(nx, y)] === Mat.Air) {
+        world.swapCells(i, world.idx(nx, y));
+      } else {
+        world.wakeAround(x, y);
+      }
       return;
     }
   }
@@ -801,11 +941,37 @@ function stepThermal(world: WorldGrid): void {
         }
       }
 
-      // 外気温への緩やかな緩和
+      // 外気温への緩やかな緩和（Alchemist 東砂丘ゾーンは日中高温になり、ガラス屋根で遮蔽可能）
       if (mat === Mat.Air || mat === Mat.Steam) {
-        const dAmb = targetAmbient - world.temp[i];
+        let localAmbient = targetAmbient;
+        if (world.hasCore && !world.isNight() && x >= 164 && y >= 32 && y <= 98) {
+          localAmbient += 18;
+        }
+        const dAmb = localAmbient - world.temp[i];
         if (dAmb !== 0) {
           world.temp[i] += Math.sign(dAmb) * Math.max(1, Math.abs((dAmb * 0.06) | 0));
+        }
+      } else if (
+        mat === Mat.Water &&
+        world.hasCore &&
+        !world.isNight() &&
+        x >= 164 &&
+        y < 98 &&
+        y > 4 &&
+        world.type[i - WIDTH] === Mat.Air &&
+        world.rng.chance(0.012)
+      ) {
+        // 東の灼熱砂丘で上空にガラス断熱ドームがない露出水滴は日射で少しずつ蒸発する
+        let hasCanopy = false;
+        for (let cy = y - 1; cy >= Math.max(2, y - 24); cy -= 2) {
+          const cm = world.type[(cy << 8) + x];
+          if (cm === Mat.Glass || cm === Mat.Stone || cm === Mat.Wood || cm === Mat.HardStone) {
+            hasCanopy = true;
+            break;
+          }
+        }
+        if (!hasCanopy) {
+          world.setCell(x, y, Mat.Steam, 95, 105);
         }
       }
     }

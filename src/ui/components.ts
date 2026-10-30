@@ -159,6 +159,94 @@ export class InputModalController {
   }
 }
 
+export interface CollapseModalOptions {
+  title: string;
+  description: string;
+  retryLabel: string;
+  newWorldLabel: string;
+  onRetryDawn: () => void;
+  onNewWorld: () => void;
+}
+
+/**
+ * テラリウム・コア耐久値 0（全滅）時に表示するソリッドリトライモーダル
+ * 直前の日の出スナップショットへの巻き戻し、または新規ワールド生成を選択できる
+ */
+export class CollapseModalController {
+  readonly backdropEl: HTMLElement;
+  private titleEl: HTMLElement;
+  private descEl: HTMLElement;
+  private retryBtn: HTMLButtonElement;
+  private newWorldBtn: HTMLButtonElement;
+  private currentRetry: (() => void) | null = null;
+  private currentNewWorld: (() => void) | null = null;
+
+  constructor() {
+    this.backdropEl = document.createElement('div');
+    this.backdropEl.className = 'tw-modal-backdrop';
+    this.backdropEl.hidden = true;
+
+    const dialog = document.createElement('div');
+    dialog.className = 'tw-modal is-danger';
+    dialog.setAttribute('role', 'alertdialog');
+    dialog.setAttribute('aria-modal', 'true');
+
+    this.titleEl = document.createElement('div');
+    this.titleEl.className = 'tw-modal-title';
+
+    this.descEl = document.createElement('p');
+    this.descEl.className = 'tw-modal-desc';
+
+    const actions = document.createElement('div');
+    actions.className = 'tw-modal-actions';
+
+    this.newWorldBtn = document.createElement('button');
+    this.newWorldBtn.type = 'button';
+    this.newWorldBtn.className = 'tw-btn';
+    this.newWorldBtn.addEventListener('click', () => {
+      const fn = this.currentNewWorld;
+      this.close();
+      fn?.();
+    });
+
+    this.retryBtn = document.createElement('button');
+    this.retryBtn.type = 'button';
+    this.retryBtn.className = 'tw-btn tw-btn-primary';
+    this.retryBtn.addEventListener('click', () => {
+      const fn = this.currentRetry;
+      this.close();
+      fn?.();
+    });
+
+    actions.append(this.newWorldBtn, this.retryBtn);
+    dialog.append(this.titleEl, this.descEl, actions);
+    this.backdropEl.appendChild(dialog);
+  }
+
+  open(opts: CollapseModalOptions): void {
+    this.titleEl.textContent = opts.title;
+    this.descEl.textContent = opts.description;
+    this.retryBtn.textContent = opts.retryLabel;
+    this.newWorldBtn.textContent = opts.newWorldLabel;
+    this.currentRetry = opts.onRetryDawn;
+    this.currentNewWorld = opts.onNewWorld;
+    this.backdropEl.hidden = false;
+    requestAnimationFrame(() => {
+      this.retryBtn.focus();
+    });
+  }
+
+  isOpen(): boolean {
+    return !this.backdropEl.hidden;
+  }
+
+  close(): void {
+    this.backdropEl.hidden = true;
+    this.currentRetry = null;
+    this.currentNewWorld = null;
+  }
+}
+
 export function escapeHtml(str: string): string {
   return str
     .replace(/&/g, '&amp;')

@@ -112,7 +112,12 @@ export function updateWoodBridgesInRegion(
         const hasRight = world.getMat(x + 1, y) === Mat.Wood || world.getMat(x + 1, y + 1) === Mat.Wood || isGroundSupport(world.getMat(x + 1, y));
         const belowMat = world.getMat(x, y + 1);
         const overOpenOrWater =
-          belowMat === Mat.Air || belowMat === Mat.Water || belowMat === Mat.Steam || belowMat === Mat.Nectar;
+          belowMat === Mat.Air ||
+          belowMat === Mat.Water ||
+          belowMat === Mat.BlightWater ||
+          belowMat === Mat.Steam ||
+          belowMat === Mat.Miasma ||
+          belowMat === Mat.Nectar;
 
         if (hasLeft && hasRight && overOpenOrWater) {
           // 太鼓橋デッキとしてマーク（上面ハイライト）
@@ -138,7 +143,14 @@ export function updateWoodBridgesInRegion(
 }
 
 function isGroundSupport(mat: MatId): boolean {
-  return mat === Mat.Stone || mat === Mat.Soil || mat === Mat.WetSoil || mat === Mat.Sand;
+  return (
+    mat === Mat.Stone ||
+    mat === Mat.HardStone ||
+    mat === Mat.Soil ||
+    mat === Mat.WetSoil ||
+    mat === Mat.BlightSoil ||
+    mat === Mat.Sand
+  );
 }
 
 function buildBackgroundPillar(world: WorldGrid, x: number, startY: number): void {

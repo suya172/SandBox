@@ -16,6 +16,8 @@ export class SoundEngine {
 
   private muted: boolean = false;
   private lastBrushSoundAt: number = 0;
+  private lastBlockSoundAt: number = 0;
+  private lastAlertSoundAt: number = 0;
   private lastAmbientBellAt: number = 0;
 
   /** ミュート状態を切り替え、現在のミュート状態を返す */
@@ -133,6 +135,75 @@ export class SoundEngine {
     gain.connect(this.masterGain);
     osc.start(t);
     osc.stop(t + 0.15);
+  }
+
+  /**
+   * 吸引・採取（Harvest）成功時の軽快な粒子回収サウンド
+   */
+  playHarvestSound(): void {
+    if (this.muted || !this.ctx || !this.masterGain) return;
+    const nowMs = performance.now();
+    if (nowMs - this.lastBrushSoundAt < 50) return;
+    this.lastBrushSoundAt = nowMs;
+
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const base = 320 + Math.random() * 140;
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(base, t);
+    osc.frequency.exponentialRampToValueAtTime(base * 1.45, t + 0.055);
+    gain.gain.setValueAtTime(0.065, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.065);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(t);
+    osc.stop(t + 0.07);
+  }
+
+  /**
+   * 硬度不足（HardStone 等）で掘削が阻まれた際の控えめな硬質反響音
+   */
+  playHardnessBlocked(): void {
+    if (this.muted || !this.ctx || !this.masterGain) return;
+    const nowMs = performance.now();
+    if (nowMs - this.lastBlockSoundAt < 220) return;
+    this.lastBlockSoundAt = nowMs;
+
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(155, t);
+    osc.frequency.exponentialRampToValueAtTime(98, t + 0.09);
+    gain.gain.setValueAtTime(0.085, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(t);
+    osc.stop(t + 0.11);
+  }
+
+  /**
+   * 日没襲撃開始・コア被弾・コア機能停止時の抑制された警告トーン
+   */
+  playAlertTone(kind: 'dusk' | 'damage' | 'collapse'): void {
+    if (this.muted || !this.ctx || !this.masterGain) return;
+    const nowMs = performance.now();
+    if (kind === 'damage' && nowMs - this.lastAlertSoundAt < 280) return;
+    this.lastAlertSoundAt = nowMs;
+
+    const t = this.ctx.currentTime;
+    if (kind === 'dusk') {
+      this.playBellNote(293.66, t, 0.45, 0.075);
+      this.playBellNote(220.0, t + 0.14, 0.55, 0.075);
+    } else if (kind === 'damage') {
+      this.playBellNote(196.0, t, 0.18, 0.08);
+    } else {
+      this.playBellNote(261.63, t, 0.4, 0.1);
+      this.playBellNote(196.0, t + 0.16, 0.5, 0.1);
+      this.playBellNote(146.83, t + 0.34, 0.75, 0.1);
+    }
   }
 
   /**

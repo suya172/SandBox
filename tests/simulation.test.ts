@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Mat } from '../src/core/materials';
 import { stepSimulation } from '../src/core/simulation';
 import { generateTerrain } from '../src/core/terrainGen';
-import { HEIGHT, WIDTH, WorldGrid } from '../src/core/world';
+import { FLAG_RUIN, HEIGHT, WIDTH, WorldGrid } from '../src/core/world';
 
 describe('Phase 1: Core Cellular Automata & Elemental Chemistry', () => {
   it('砂が重力で落下して床の上に堆積し、水中では水と入れ替わって沈むこと', () => {
@@ -123,5 +123,83 @@ describe('Phase 1: Core Cellular Automata & Elemental Chemistry', () => {
     expect(w1.type).toEqual(w2.type);
     expect(WIDTH).toBe(256);
     expect(HEIGHT).toBe(144);
+
+    // 5ゾーンバイオーム要素（腐敗土・硬岩・休眠湧水石・深層溶岩・古代遺構フラグ）が含まれること
+    let hasBlightSoil = false;
+    let hasHardStone = false;
+    let hasDormantSpring = false;
+    let hasMagma = false;
+    let hasRuin = false;
+    for (let i = 0; i < w1.size; i++) {
+      const m = w1.type[i];
+      if (m === Mat.BlightSoil) hasBlightSoil = true;
+      if (m === Mat.HardStone) hasHardStone = true;
+      if (m === Mat.Spring && w1.meta[i] === 1) hasDormantSpring = true;
+      if (m === Mat.Magma) hasMagma = true;
+      if ((w1.flags[i] & FLAG_RUIN) !== 0) hasRuin = true;
+    }
+    expect(hasBlightSoil).toBe(true);
+    expect(hasHardStone).toBe(true);
+    expect(hasDormantSpring).toBe(true);
+    expect(hasMagma).toBe(true);
+    expect(hasRuin).toBe(true);
+  });
+
+  it('汚染水 (BlightWater) と腐敗土 (BlightSoil) が発光キノコ・灰の作用で清水・湿潤土へ浄化されること', () => {
+    const world = new WorldGrid(808);
+    for (let x = 38; x <= 45; x++) {
+      world.setCell(x, 72, Mat.Stone);
+    }
+    // 浄化された水が流れ落ちないよう器の両端に縁を設ける
+    world.setCell(38, 71, Mat.Stone);
+    world.setCell(45, 71, Mat.Stone);
+    world.setCell(40, 71, Mat.BlightSoil);
+    world.setCell(41, 71, Mat.Mushroom);
+    world.setCell(42, 71, Mat.BlightWater);
+
+    for (let t = 0; t < 180; t++) {
+      stepSimulation(world);
+    }
+
+    expect(world.getMat(40, 71)).toBe(Mat.WetSoil);
+    let hasCleanWater = false;
+    for (let x = 39; x <= 44; x++) {
+      if (world.getMat(x, 71) === Mat.Water) hasCleanWater = true;
+    }
+    expect(hasCleanWater).toBe(true);
+  });
+
+  it('硬岩に封鎖された休眠湧水石 (Spring, meta=1) の周囲を開通させると清水が湧出し始めること', () => {
+    const world = new WorldGrid(909);
+    // 周囲をすべて硬岩で囲んだ休眠湧水石
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        world.setCell(60 + dx, 90 + dy, Mat.HardStone);
+      }
+    }
+    world.setCell(60, 90, Mat.Spring, 1);
+
+    for (let t = 0; t < 40; t++) {
+      stepSimulation(world);
+    }
+    // 封鎖中は休眠状態 (meta=1) のまま
+    expect(world.meta[world.idx(60, 90)]).toBe(1);
+
+    // 上部の硬岩を掘削して空間を開通させる
+    world.setCell(60, 89, Mat.Air);
+    world.setCell(60, 88, Mat.Air);
+
+    for (let t = 0; t < 60; t++) {
+      stepSimulation(world);
+    }
+
+    expect(world.meta[world.idx(60, 90)]).toBe(0);
+    let spawnedWater = false;
+    for (let y = 86; y <= 92; y++) {
+      for (let x = 58; x <= 62; x++) {
+        if (world.getMat(x, y) === Mat.Water) spawnedWater = true;
+      }
+    }
+    expect(spawnedWater).toBe(true);
   });
 });

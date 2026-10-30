@@ -111,6 +111,9 @@ export class LightingRenderer {
     this.blurPass();
     this.blurPass();
 
+    // カゲむし等の光忌避AIが O(1) で参照できるよう WorldGrid.lightLuma を更新（コア自身の微光は除外）
+    world.updateLightField(extraLights);
+
     if (!this.glowImage) return;
 
     // ImageData へ書き込み

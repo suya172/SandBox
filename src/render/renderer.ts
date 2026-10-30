@@ -1,6 +1,6 @@
 import { BgMat, MATERIALS, Mat, packABGR } from '../core/materials';
 import { hash2D } from '../core/prng';
-import { FLAG_NO_BRUSH, HEIGHT, SIZE, WIDTH, WorldGrid } from '../core/world';
+import { FLAG_NO_BRUSH, FLAG_RUIN, HEIGHT, SIZE, WIDTH, WorldGrid } from '../core/world';
 
 /**
  * Canvas 2D ImageData (Uint32Array) ベースの高速ピクセルレンダラー
@@ -96,15 +96,26 @@ export class WorldRenderer {
         const variantIdx = h % 3;
         let col = def.baseColors[variantIdx];
 
-        if (mat === Mat.Water) {
-          // 水面のきらめきと半透明ブレンド
+        if (mat === Mat.Water || mat === Mat.BlightWater) {
+          // 水面・汚染水面のきらめきと半透明ブレンド
           const shimmer = ((x + (tick >> 2) + y * 3) & 7) === 0;
           if (shimmer || (y > 0 && types[i - WIDTH] === Mat.Air)) {
-            col = packABGR(130, 206, 252);
+            col = mat === Mat.Water ? packABGR(130, 206, 252) : packABGR(154, 118, 186);
           }
           col = shadeByDaylight(col, Math.max(0.42, daylight));
-          outPixels32[i] = blendABGR(bgCol, col, 0.78);
+          outPixels32[i] = blendABGR(bgCol, col, mat === Mat.Water ? 0.78 : 0.84);
           continue;
+        }
+
+        if (mat === Mat.HardStone) {
+          // 硬岩地層：斜め層理の模様を入れて通常の石材と視覚的に明確化する
+          const strata = ((x + y * 2) & 7) === 0;
+          if (strata) {
+            col = packABGR(52, 58, 74);
+          }
+        } else if ((world.flags[i] & FLAG_RUIN) !== 0 && ((x + y) & 3) === 0) {
+          // 古代遺構ブロック：わずかに風化した緑青・古色ディテールを加える
+          col = blendABGR(col, packABGR(96, 128, 110), 0.35);
         }
 
         if (mat === Mat.Glass) {
@@ -115,8 +126,8 @@ export class WorldRenderer {
           continue;
         }
 
-        if (mat === Mat.Steam || mat === Mat.Smoke || mat === Mat.Spore) {
-          const alpha = mat === Mat.Spore ? 0.82 : 0.48;
+        if (mat === Mat.Steam || mat === Mat.Smoke || mat === Mat.Spore || mat === Mat.Miasma) {
+          const alpha = mat === Mat.Spore ? 0.82 : mat === Mat.Miasma ? 0.62 : 0.48;
           outPixels32[i] = blendABGR(bgCol, col, alpha);
           continue;
         }

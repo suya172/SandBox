@@ -1,5 +1,5 @@
 /**
- * マテリアルID・物理属性・カラーパレット定義
+ * マテリアルID・物理属性・硬度・カラーパレット定義
  * Canvas ImageData (Little Endian Uint32Array) 向けに 0xAABBGGRR 形式の色を事前計算する
  */
 
@@ -41,10 +41,14 @@ export const Mat = {
   WeatherAntenna: 33,
   Core: 34,
   Spring: 35,
+  HardStone: 36,
+  BlightWater: 37,
+  BlightSoil: 38,
+  Miasma: 39,
 } as const;
 
 export type MatId = (typeof Mat)[keyof typeof Mat];
-export const MAT_COUNT = 36;
+export const MAT_COUNT = 40;
 
 /** 背景構造レイヤーID */
 export const BgMat = {
@@ -82,6 +86,7 @@ export interface MaterialDef {
   id: MatId;
   key: string;
   category: MatCategoryId;
+  hardness: 0 | 1 | 2 | 3;  // 必要ツールティア (0:気体/エネルギー, 1:素手/木工, 2:石工, 3:星屑制御)
   density: number;          // 密度（大きいほど下に沈む）
   defaultTemp: number;      // 初期温度 (℃)
   heatConductivity: number; // 熱伝導率 (0.0 ~ 1.0)
@@ -91,7 +96,7 @@ export interface MaterialDef {
   dispersion: number;       // 液体・気体の横拡散ステップ数
   baseColors: [number, number, number]; // 3段階のテクスチャバリエーション色 (ABGR)
   glowColor?: [number, number, number]; // 発光RGB強度 (0~255)
-  secondaryProduct?: boolean;           // Alchemist Mode で直接ブラシ配置不可の創発生成物か
+  secondaryProduct?: boolean;           // Alchemist Mode で直接ブラシ配置不可の創発・地形専用要素か
 }
 
 function makePalette(
@@ -116,6 +121,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Air,
     key: 'air',
     category: MatCategory.Empty,
+    hardness: 0,
     density: 0,
     defaultTemp: 22,
     heatConductivity: 0.15,
@@ -130,6 +136,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Stone,
     key: 'stone',
     category: MatCategory.Solid,
+    hardness: 2,
     density: 100,
     defaultTemp: 20,
     heatConductivity: 0.35,
@@ -144,6 +151,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Sand,
     key: 'sand',
     category: MatCategory.Powder,
+    hardness: 1,
     density: 65,
     defaultTemp: 24,
     heatConductivity: 0.3,
@@ -158,6 +166,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Soil,
     key: 'soil',
     category: MatCategory.Powder,
+    hardness: 1,
     density: 60,
     defaultTemp: 22,
     heatConductivity: 0.25,
@@ -172,6 +181,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.WetSoil,
     key: 'wet_soil',
     category: MatCategory.Powder,
+    hardness: 1,
     density: 68,
     defaultTemp: 20,
     heatConductivity: 0.4,
@@ -180,12 +190,14 @@ export const MATERIALS: readonly MaterialDef[] = [
     insulator: false,
     dispersion: 0,
     baseColors: makePalette(86, 58, 40, 8),
+    secondaryProduct: true,
   },
   // 5: Water
   {
     id: Mat.Water,
     key: 'water',
     category: MatCategory.Liquid,
+    hardness: 1,
     density: 30,
     defaultTemp: 20,
     heatConductivity: 0.6,
@@ -200,6 +212,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Magma,
     key: 'magma',
     category: MatCategory.Liquid,
+    hardness: 3,
     density: 80,
     defaultTemp: 850,
     heatConductivity: 0.85,
@@ -215,6 +228,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Nectar,
     key: 'nectar',
     category: MatCategory.Liquid,
+    hardness: 1,
     density: 36,
     defaultTemp: 22,
     heatConductivity: 0.3,
@@ -231,6 +245,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Steam,
     key: 'steam',
     category: MatCategory.Gas,
+    hardness: 0,
     density: -15,
     defaultTemp: 115,
     heatConductivity: 0.45,
@@ -239,12 +254,14 @@ export const MATERIALS: readonly MaterialDef[] = [
     insulator: false,
     dispersion: 4,
     baseColors: makePalette(215, 232, 245, 12),
+    secondaryProduct: true,
   },
   // 9: Spore
   {
     id: Mat.Spore,
     key: 'spore',
     category: MatCategory.Gas,
+    hardness: 0,
     density: -5,
     defaultTemp: 22,
     heatConductivity: 0.15,
@@ -261,6 +278,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Fire,
     key: 'fire',
     category: MatCategory.Energy,
+    hardness: 0,
     density: -20,
     defaultTemp: 520,
     heatConductivity: 0.9,
@@ -280,6 +298,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Smoke,
     key: 'smoke',
     category: MatCategory.Gas,
+    hardness: 0,
     density: -18,
     defaultTemp: 90,
     heatConductivity: 0.2,
@@ -288,12 +307,14 @@ export const MATERIALS: readonly MaterialDef[] = [
     insulator: false,
     dispersion: 3,
     baseColors: makePalette(88, 86, 94, 10),
+    secondaryProduct: true,
   },
   // 12: Ash
   {
     id: Mat.Ash,
     key: 'ash',
     category: MatCategory.Powder,
+    hardness: 1,
     density: 45,
     defaultTemp: 40,
     heatConductivity: 0.2,
@@ -309,6 +330,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Seed,
     key: 'seed',
     category: MatCategory.Powder,
+    hardness: 1,
     density: 50,
     defaultTemp: 22,
     heatConductivity: 0.2,
@@ -323,6 +345,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.PlantStem,
     key: 'plant_stem',
     category: MatCategory.Flora,
+    hardness: 1,
     density: 90,
     defaultTemp: 22,
     heatConductivity: 0.25,
@@ -338,6 +361,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Leaf,
     key: 'leaf',
     category: MatCategory.Flora,
+    hardness: 1,
     density: 85,
     defaultTemp: 22,
     heatConductivity: 0.2,
@@ -353,6 +377,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Flower,
     key: 'flower',
     category: MatCategory.Flora,
+    hardness: 1,
     density: 85,
     defaultTemp: 22,
     heatConductivity: 0.2,
@@ -373,6 +398,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Fruit,
     key: 'fruit',
     category: MatCategory.Powder,
+    hardness: 1,
     density: 52,
     defaultTemp: 22,
     heatConductivity: 0.25,
@@ -389,6 +415,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Mushroom,
     key: 'mushroom',
     category: MatCategory.Flora,
+    hardness: 1,
     density: 85,
     defaultTemp: 20,
     heatConductivity: 0.25,
@@ -408,6 +435,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.VoltFern,
     key: 'volt_fern',
     category: MatCategory.Flora,
+    hardness: 1,
     density: 90,
     defaultTemp: 22,
     heatConductivity: 0.35,
@@ -423,6 +451,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Wood,
     key: 'wood',
     category: MatCategory.Solid,
+    hardness: 1,
     density: 100,
     defaultTemp: 22,
     heatConductivity: 0.2,
@@ -437,6 +466,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Glass,
     key: 'glass',
     category: MatCategory.Solid,
+    hardness: 2,
     density: 100,
     defaultTemp: 20,
     heatConductivity: 0.02, // 高い断熱性
@@ -451,6 +481,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Obsidian,
     key: 'obsidian',
     category: MatCategory.Powder,
+    hardness: 3,
     density: 92,
     defaultTemp: 60,
     heatConductivity: 0.2,
@@ -471,6 +502,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.StarShard,
     key: 'star_shard',
     category: MatCategory.Powder,
+    hardness: 3,
     density: 88,
     defaultTemp: 45,
     heatConductivity: 0.4,
@@ -491,6 +523,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Lightning,
     key: 'lightning',
     category: MatCategory.Energy,
+    hardness: 0,
     density: -10,
     defaultTemp: 650,
     heatConductivity: 0.9,
@@ -510,6 +543,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Copper,
     key: 'copper',
     category: MatCategory.Machine,
+    hardness: 2,
     density: 100,
     defaultTemp: 22,
     heatConductivity: 0.75,
@@ -524,6 +558,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.RotorHub,
     key: 'rotor_hub',
     category: MatCategory.Machine,
+    hardness: 2,
     density: 100,
     defaultTemp: 22,
     heatConductivity: 0.5,
@@ -539,6 +574,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Battery,
     key: 'battery',
     category: MatCategory.Machine,
+    hardness: 2,
     density: 100,
     defaultTemp: 22,
     heatConductivity: 0.4,
@@ -553,6 +589,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Pipe,
     key: 'pipe',
     category: MatCategory.Machine,
+    hardness: 2,
     density: 100,
     defaultTemp: 22,
     heatConductivity: 0.35,
@@ -567,6 +604,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Pump,
     key: 'pump',
     category: MatCategory.Machine,
+    hardness: 2,
     density: 100,
     defaultTemp: 22,
     heatConductivity: 0.4,
@@ -581,6 +619,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.GateClosed,
     key: 'gate',
     category: MatCategory.Machine,
+    hardness: 2,
     density: 100,
     defaultTemp: 22,
     heatConductivity: 0.3,
@@ -595,6 +634,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.GateOpen,
     key: 'gate_open',
     category: MatCategory.Empty,
+    hardness: 2,
     density: 0,
     defaultTemp: 22,
     heatConductivity: 0.2,
@@ -610,6 +650,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Sensor,
     key: 'sensor',
     category: MatCategory.Machine,
+    hardness: 2,
     density: 100,
     defaultTemp: 22,
     heatConductivity: 0.4,
@@ -624,6 +665,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.WeatherAntenna,
     key: 'weather_antenna',
     category: MatCategory.Machine,
+    hardness: 3,
     density: 100,
     defaultTemp: 22,
     heatConductivity: 0.6,
@@ -639,6 +681,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Core,
     key: 'core',
     category: MatCategory.Machine,
+    hardness: 3,
     density: 255,
     defaultTemp: 24,
     heatConductivity: 0.5,
@@ -659,6 +702,7 @@ export const MATERIALS: readonly MaterialDef[] = [
     id: Mat.Spring,
     key: 'spring',
     category: MatCategory.Solid,
+    hardness: 3,
     density: 200,
     defaultTemp: 16,
     heatConductivity: 0.5,
@@ -668,11 +712,78 @@ export const MATERIALS: readonly MaterialDef[] = [
     dispersion: 0,
     baseColors: makePalette(76, 148, 188, 10),
     glowColor: [40, 110, 160],
+    secondaryProduct: true,
+  },
+  // 36: HardStone (硬岩層: Tier 2 以上の掘削が必要)
+  {
+    id: Mat.HardStone,
+    key: 'hard_stone',
+    category: MatCategory.Solid,
+    hardness: 2,
+    density: 120,
+    defaultTemp: 18,
+    heatConductivity: 0.3,
+    flammability: 0,
+    conductive: false,
+    insulator: false,
+    dispersion: 0,
+    baseColors: makePalette(68, 76, 92, 8),
+    secondaryProduct: true,
+  },
+  // 37: BlightWater (汚染水: 発光キノコ・灰・砂濾過で浄化)
+  {
+    id: Mat.BlightWater,
+    key: 'blight_water',
+    category: MatCategory.Liquid,
+    hardness: 1,
+    density: 32,
+    defaultTemp: 19,
+    heatConductivity: 0.5,
+    flammability: 0,
+    conductive: true,
+    insulator: false,
+    dispersion: 4,
+    baseColors: makePalette(112, 86, 142, 10),
+    glowColor: [38, 24, 52],
+    secondaryProduct: true,
+  },
+  // 38: BlightSoil (腐敗土: 灰または発光キノコで湿潤土へ再生)
+  {
+    id: Mat.BlightSoil,
+    key: 'blight_soil',
+    category: MatCategory.Powder,
+    hardness: 1,
+    density: 64,
+    defaultTemp: 20,
+    heatConductivity: 0.25,
+    flammability: 0,
+    conductive: false,
+    insulator: false,
+    dispersion: 0,
+    baseColors: makePalette(82, 68, 86, 8),
+    secondaryProduct: true,
+  },
+  // 39: Miasma (瘴気霧: 夜間に漂い、光や熱で霧散する)
+  {
+    id: Mat.Miasma,
+    key: 'miasma',
+    category: MatCategory.Gas,
+    hardness: 0,
+    density: -3,
+    defaultTemp: 15,
+    heatConductivity: 0.15,
+    flammability: 40,
+    conductive: false,
+    insulator: false,
+    dispersion: 3,
+    baseColors: makePalette(76, 56, 98, 10),
+    secondaryProduct: true,
   },
 ];
 
 /** 高速参照用ルックアップTypedArray（ホットループ内でのオブジェクト参照削減） */
 export const MAT_CATEGORY = new Uint8Array(MAT_COUNT);
+export const MAT_HARDNESS = new Uint8Array(MAT_COUNT);
 export const MAT_DENSITY = new Int16Array(MAT_COUNT);
 export const MAT_DEFAULT_TEMP = new Int16Array(MAT_COUNT);
 export const MAT_FLAMMABILITY = new Uint8Array(MAT_COUNT);
@@ -683,6 +794,7 @@ export const MAT_DISPERSION = new Uint8Array(MAT_COUNT);
 for (let i = 0; i < MAT_COUNT; i++) {
   const def = MATERIALS[i];
   MAT_CATEGORY[i] = def.category;
+  MAT_HARDNESS[i] = def.hardness;
   MAT_DENSITY[i] = def.density;
   MAT_DEFAULT_TEMP[i] = def.defaultTemp;
   MAT_FLAMMABILITY[i] = def.flammability;
@@ -696,4 +808,3 @@ export function isSolidBlocking(mat: number): boolean {
   const cat = MAT_CATEGORY[mat];
   return cat === MatCategory.Solid || cat === MatCategory.Machine || cat === MatCategory.Flora;
 }
-

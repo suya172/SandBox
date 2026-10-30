@@ -267,6 +267,67 @@ body {
   color: var(--color-warning);
 }
 
+.tw-readout-item.is-danger {
+  color: var(--color-danger);
+}
+
+.tw-readout-strip.is-raid {
+  border-color: var(--color-warning);
+}
+
+.tw-readout-strip.is-eclipse {
+  border-color: var(--color-danger);
+}
+
+.tw-vitality-strip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  background-color: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-btn);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tw-vitality-strip.is-critical {
+  border-color: var(--color-danger);
+}
+
+.tw-tier-badge {
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+.tw-vitality-meter {
+  width: 56px;
+  height: 6px;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.tw-vitality-fill {
+  height: 100%;
+  background-color: var(--color-accent);
+}
+
+.tw-vitality-fill.is-danger {
+  background-color: var(--color-danger);
+}
+
+.tw-vitality-num {
+  color: var(--color-text-primary);
+  min-width: 28px;
+  text-align: right;
+}
+
+.tw-vitality-num.is-danger {
+  color: var(--color-danger);
+}
+
 /* ==========================================================================
    Main Simulation Workspace & Viewport
    ========================================================================== */
@@ -416,6 +477,18 @@ body {
   color: var(--color-accent);
 }
 
+.tw-law-note {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+  padding-left: var(--space-2);
+  border-left: 2px solid var(--color-border);
+}
+
+.tw-val-warning {
+  color: var(--color-warning) !important;
+}
+
 .tw-status-complete {
   font-size: 12px;
   color: var(--color-accent);
@@ -498,6 +571,39 @@ body {
   padding: var(--space-1) var(--space-2);
   min-height: 26px;
   font-size: 12px;
+}
+
+.tw-brush-btn.is-depleted:not(.is-selected) {
+  color: var(--color-text-secondary);
+}
+
+.tw-brush-btn.is-locked-preview {
+  border-style: dashed;
+  background-color: var(--color-bg);
+  color: var(--color-text-secondary);
+  opacity: 0.55;
+}
+
+.tw-brush-stock {
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+  padding-left: var(--space-1);
+}
+
+.tw-brush-stock.is-inf {
+  color: var(--color-accent);
+  font-weight: 500;
+}
+
+.tw-brush-stock.is-zero {
+  color: var(--color-warning);
+}
+
+.tw-brush-tier-req {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
 }
 
 .tw-dock-controls {
@@ -624,6 +730,20 @@ body {
   font-size: 13px;
   font-weight: 600;
   color: var(--color-text-primary);
+}
+
+.tw-modal.is-danger {
+  border-color: var(--color-danger);
+}
+
+.tw-modal.is-danger .tw-modal-title {
+  color: var(--color-danger);
+}
+
+.tw-modal-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
 }
 
 .tw-input {
